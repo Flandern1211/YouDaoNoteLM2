@@ -10,18 +10,36 @@ state.ToolInfos
 state.DeferredToolInfos
 ```
 
-因此接入流程为：
+W0 静态源码核对已经确认以上字段和改写持久语义，但 Legacy 行为测试、Handler 顺序测试和多轮 ReAct 契约测试尚未实现，因此 W0 状态仍是“进行中”。
+
+当前 W0–W4 接入流程为：
 
 ```text
-PrepareTurn
-→ TurnContext.MessagePlan
+chatAgentService 接受当前请求
+→ Legacy/Shadow Turn Adapter
+→ ContextCompiler.PrepareTurn
+→ PreparedTurn.MessagePlan
 → AgentInputBuilder 生成初始消息
 → Eino GenModelInput 注入唯一系统 Instruction
 → ReAct
 → ContextMiddleware.BeforeModelRewriteState
-→ Manager.CompileModelInput
+→ ContextCompiler.CompileModelInput
 → 返回修改后的 state.Messages
+→ 收集无正文 CompileRecord/Manifest
 ```
+
+W5–W7 在未来 Harness 可用后的目标流程为：
+
+```text
+RunService.AcceptTurn
+→ Worker/Harness ClaimRun
+→ TurnLifecycleCoordinator.BeginTurn
+→ ContextCompiler.PrepareTurn / CompileModelInput
+→ Eino 产生终态
+→ Harness 调用 TurnLifecycleCoordinator.FinalizeTurn
+```
+
+第一段可以独立实现；第二段依赖当前尚不存在的 RunService、Worker、Authority、Outbox 和持久化 Harness，不能用当前 `chatAgentService` 伪造生产保证。
 
 ContextMiddleware 使用接口式 `ChatModelAgentMiddleware`，不使用已标记为兼容路径的旧 struct Middleware。
 
@@ -40,6 +58,8 @@ ContextMiddleware 使用接口式 `ChatModelAgentMiddleware`，不使用已标�
 最终实现计划必须通过 Eino 契约测试确认 Handler 注册顺序与实际调用顺序一致。任一 Handler 修改消息后，后续 Handler 必须读取修改后的状态。
 
 上下文注入必须幂等，不能在每次模型调用前重复追加记忆、摘要或当前输入。
+
+`AfterAgent` 只在 Eino Agent 成功终止后调用；模型错误、取消、超出迭代等路径不会调用。它可以做成功路径的轻量后处理或事件采集，但不能作为助手消息、终态 Manifest 或可靠写回调度的唯一入口。
 
 ## 3. 输入预算
 
@@ -105,9 +125,9 @@ Profile 可以设置更小上限。扩大上限需要新 Profile 版本和回归
   → 直接调用模型
 
 估算值 >= 70%
-  → 尝试精确计数
+  → 尝试 Provider 支持的最高可信计数
 
-精确值或保守估算 < 80%
+Provider 精确值、本地兼容值或保守估算 < 80%
   → 调用模型
 
 达到 80%
@@ -120,10 +140,15 @@ Profile 可以设置更小上限。扩大上限需要新 Profile 版本和回归
 
 - Prompt、工具 Schema 和稳定 ContextItem 缓存 Token 数。
 - 动态消息只计算新增部分。
-- Provider 返回真实 usage 时可作为后续估算基线。
-- 热路径优先本地近似计数。
-- 只有接近阈值时才调用远程精确计数接口。
-- 精确计数失败按自己的解析链回退到保守估算；所有计数方式均不可用时中止。
+- Anthropic 热路径先保守估算，接近阈值时调用现有 SDK 的 `Messages.CountTokens`，结果标记为 `exact_provider`。
+- 已知 OpenAI 模型由版本化模型注册表显式选择 `o200k_base` 或 `cl100k_base` 的本地兼容实现，结果标记为 `compatible_local`。
+- 自定义 OpenAI-compatible 模型必须显式配置编码和 ContextWindow；未配置时生产环境拒绝，不能按模型名猜测。
+- 无匹配 tokenizer 的开发回退使用 `conservative_utf8_bytes`：UTF-8 正文字节数加消息、角色和工具结构开销。
+- 中文使用匹配 tokenizer；没有匹配时按 UTF-8 字节保守估算，不使用“字符数除以四”。
+- Provider 返回真实 usage 只作为后续偏差监测和校准基线，不能替代调用前预算。
+- Provider 精确计数失败按自己的解析链回退到本地兼容或保守估算；所有允许的计数方式均不可用时中止。
+
+具体 Go tokenizer 依赖必须在 W3 通过中文、特殊 Token、消息封装和工具 Schema 契约测试后才能引入。编码匹配不等于完整请求永久精确，Manifest 必须记录 CounterMode、编码和策略版本。
 
 ## 8. 治理顺序
 
@@ -145,7 +170,7 @@ Profile 可以设置更小上限。扩大上限需要新 Profile 版本和回归
 - 活跃工具调用组不可部分删除。
 - 旧工具结果清理必须保留明确占位，说明结果已因上下文治理移除。
 - 单个工具结果超限时，优先使用工具 Runtime 提供的原始结果引用和摘要。
-- ContextManager 不负责保存完整工具结果。
+- ContextCompiler 不负责保存完整工具结果。
 - 没有可恢复引用且无法安全缩减时返回 `ToolContextOverflow`。
 
 RAG 模块的完整检索数据继续由 RAG/引用系统管理；发送给模型的格式化结果应保持有界。
@@ -157,12 +182,37 @@ RAG 模块的完整检索数据继续由 RAG/引用系统管理；发送给模�
 - 会话摘要：由会话模块持久化，带 `ThroughMessageID` 和版本，下轮读取。
 - 运行内摘要：Eino Middleware 为当前 ReAct Run 控制窗口，只修改当前 Agent 状态。
 
-ContextManager 不把运行内摘要直接写回会话摘要。是否将其作为会话模块的摘要输入由后续写回流程决定。
+ContextCompiler 不把运行内摘要直接覆盖会话摘要。未来 `FinalizeTurn` 可以把它作为带来源和覆盖边界的候选交给 SummaryWriter；SummaryWriter 仍需根据已提交消息边界、当前摘要版本和 CAS 规则决定是否更新。
 
-## 11. Prompt Cache
+## 11. 终态与可靠写回
+
+本节属于 W5–W7 的未来 Harness 集成契约，不是当前代码的执行流程。W0–W4 的 Shadow 接入只生成编译记录和模拟写回计划，不调用这些 Writer。
+
+Harness 必须在 Eino 返回成功、错误或取消等终态后统一构造 `TurnOutcome`，附带全部 `CompileRecord` 并调用 `FinalizeTurn`。可恢复暂停只保存 checkpoint 和当前 Agent State，不执行终态 Finalize；Resume 后继续同一逻辑 Turn：
+
+```text
+Eino final answer
+  → Harness: running → finalizing + FinalizationTicket
+  → FinalizeTurn(success)
+  → AssistantMessageWriter 幂等提交
+  → Summary/Memory 可靠调度
+  → Harness: finalizing → completed
+  → Manifest
+
+Eino error / cancellation
+  → FinalizeTurn(non-success)
+  → 不提取成功回答记忆
+  → 记录终态 Manifest
+```
+
+运行中的 ToolCall/ToolResult、Eino State 和 checkpoint 继续在 Agent Runtime/Harness 的 step 边界管理。`FinalizeTurn` 不是唯一状态持久化点，也不重放工具副作用。
+
+`PreparedTurnSnapshot`、已经产生的 `CompileRecord` 和运行内摘要候选必须注册为 Eino 可 checkpoint 的类型，或存入 Harness 管理的受控 checkpoint payload。Resume 优先恢复该快照，不重新调用 History/Memory Provider；只有首次模型调用前尚未产生 checkpoint 时，才按 Run 中固化的 Profile、Prompt、模型和 ContextMode 版本重新准备。
+
+## 12. Prompt Cache
 
 - 工具定义顺序稳定。
 - 系统 Prompt 内容由版本控制，运行中不变化。
 - 动态记忆、历史和工具结果位于稳定前缀之后。
 - Profile 和工具集变化必须改变对应版本和派生缓存键。
-- ContextManager 不为了节省少量 Token 而频繁重排稳定工具集合。
+- ContextCompiler 不为了节省少量 Token 而频繁重排稳定工具集合。
