@@ -6,6 +6,9 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// RecentRoundsLimit 缓存中保留的最近对话轮数（与 Legacy ContextBuilder 一致）
+const RecentRoundsLimit = 10
+
 // AgentID 标识 Agent 类型
 type AgentID string
 

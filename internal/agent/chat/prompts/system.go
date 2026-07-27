@@ -1,5 +1,41 @@
 package prompts
 
+import (
+	"fmt"
+	"strings"
+)
+
+// SourceInfo 资料来源信息，用于统一 Prompt 渲染
+type SourceInfo struct {
+	ID   uint
+	Name string
+}
+
+// RenderSystemPrompt 统一的系统提示词渲染函数。
+// 所有需要生成 Chat Agent 系统提示词的地方都必须通过此函数，
+// 禁止复制模板或在 Provider 内重写提示词。
+func RenderSystemPrompt(sources []SourceInfo) string {
+	sourceList := renderSourceList(sources)
+	return strings.Replace(ChatAgentSystemPrompt, "{{.SourceList}}", sourceList, 1)
+}
+
+// renderSourceList 渲染资料列表
+func renderSourceList(sources []SourceInfo) string {
+	if len(sources) == 0 {
+		return "（用户未选定特定资料）"
+	}
+
+	var sb strings.Builder
+	for i, src := range sources {
+		name := src.Name
+		if name == "" {
+			name = fmt.Sprintf("资料#%d", src.ID)
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s (ID: %d)\n", i+1, name, src.ID))
+	}
+	return sb.String()
+}
+
 // ChatAgentSystemPrompt Agent 模式的系统提示词
 const ChatAgentSystemPrompt = `# 角色
 你是一个智能知识问答助手，基于用户选定的资料来源回答问题。

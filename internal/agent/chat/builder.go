@@ -3,7 +3,6 @@ package chat
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -204,20 +203,15 @@ func (b *ChatAgentBuilder) buildDefaultTools() {
 	}
 }
 
-// buildSystemPrompt 构建系统提示词，注入资料列表
+// buildSystemPrompt 构建系统提示词，注入资料列表。
+// 委托给 prompts.RenderSystemPrompt，确保单一事实源。
 func (b *ChatAgentBuilder) buildSystemPrompt() string {
-	if len(b.sourceIDs) == 0 {
-		return strings.Replace(prompts.ChatAgentSystemPrompt, "{{.SourceList}}", "（用户未选定特定资料）", 1)
-	}
-
-	var sb strings.Builder
+	sources := make([]prompts.SourceInfo, len(b.sourceIDs))
 	for i, id := range b.sourceIDs {
-		name := b.sourceNames[id]
-		if name == "" {
-			name = fmt.Sprintf("资料#%d", id)
+		sources[i] = prompts.SourceInfo{
+			ID:   id,
+			Name: b.sourceNames[id],
 		}
-		sb.WriteString(fmt.Sprintf("%d. %s (ID: %d)\n", i+1, name, id))
 	}
-
-	return strings.Replace(prompts.ChatAgentSystemPrompt, "{{.SourceList}}", sb.String(), 1)
+	return prompts.RenderSystemPrompt(sources)
 }
