@@ -96,6 +96,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("security.encryption_key 必须为32字节，当前%d字节", len(c.Security.EncryptionKey))
 	}
 
+	// Agent Context Management
+	if err := c.Agent.ContextManagement.Validate(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -115,13 +120,51 @@ type Config struct {
 
 // AgentConfig 搜索 Agent 运行参数（零值时使用代码内默认值，无需在 yaml 配置）
 type AgentConfig struct {
-	MaxSearchRounds         int           `mapstructure:"max_search_rounds"`          // 最大搜索轮数，默认 2
-	MaxIterations           int           `mapstructure:"max_iterations"`             // ReAct 最大迭代数，默认 4
-	ExecuteTimeout          time.Duration `mapstructure:"execute_timeout"`            // 搜索超时，默认 3min
-	ExecuteWithImportTimeout time.Duration `mapstructure:"execute_with_import_timeout"` // 含导入的搜索超时，默认 5min
-	MaxConcurrent           int           `mapstructure:"max_concurrent"`             // per-user 最大并发，默认 1
-	CancelTimeout           time.Duration `mapstructure:"cancel_timeout"`             // 中断后等待安全点超时，默认 5s
-	MainAgentEnabled        bool          `mapstructure:"main_agent_enabled"`         // 主从协同开关，默认 false（关闭时行为等价于现有）
+	MaxSearchRounds          int                     `mapstructure:"max_search_rounds"`           // 最大搜索轮数，默认 2
+	MaxIterations            int                     `mapstructure:"max_iterations"`              // ReAct 最大迭代数，默认 4
+	ExecuteTimeout           time.Duration           `mapstructure:"execute_timeout"`             // 搜索超时，默认 3min
+	ExecuteWithImportTimeout time.Duration           `mapstructure:"execute_with_import_timeout"` // 含导入的搜索超时，默认 5min
+	MaxConcurrent            int                     `mapstructure:"max_concurrent"`              // per-user 最大并发，默认 1
+	CancelTimeout            time.Duration           `mapstructure:"cancel_timeout"`              // 中断后等待安全点超时，默认 5s
+	MainAgentEnabled         bool                    `mapstructure:"main_agent_enabled"`          // 主从协同开关，默认 false（关闭时行为等价于现有）
+	ContextManagement        ContextManagementConfig `mapstructure:"context_management"`          // 上下文管理配置（W6）
+}
+
+// ContextManagementConfig 上下文管理配置
+type ContextManagementConfig struct {
+	Mode                    string `mapstructure:"mode"`                       // legacy | shadow | enabled
+	ShadowSampleBasisPoints uint16 `mapstructure:"shadow_sample_basis_points"` // 0-10000 基点
+	RolloutVersion          string `mapstructure:"rollout_version"`            // 灰度版本
+	MemoryEnabled           bool   `mapstructure:"memory_enabled"`             // 记忆功能开关
+	ExactCountEnabled       bool   `mapstructure:"exact_count_enabled"`        // 精确计数开关
+	WritebackEnabled        bool   `mapstructure:"writeback_enabled"`          // 新写回路径开关
+	FingerprintSalt         string `mapstructure:"fingerprint_salt"`           // 指纹盐
+}
+
+// GetMode 获取上下文管理模式，默认 legacy
+func (c *ContextManagementConfig) GetMode() string {
+	if c.Mode == "" {
+		return "legacy"
+	}
+	return c.Mode
+}
+
+// Validate 校验上下文管理配置
+func (c *ContextManagementConfig) Validate() error {
+	mode := c.GetMode()
+	if mode != "legacy" && mode != "shadow" && mode != "enabled" {
+		return fmt.Errorf("agent.context_management.mode 无效: %s（允许: legacy, shadow, enabled）", mode)
+	}
+
+	if c.ShadowSampleBasisPoints > 10000 {
+		return fmt.Errorf("agent.context_management.shadow_sample_basis_points 越界: %d（允许: 0-10000）", c.ShadowSampleBasisPoints)
+	}
+
+	if c.ShadowSampleBasisPoints > 0 && c.RolloutVersion == "" {
+		return fmt.Errorf("agent.context_management.rollout_version 不能为空（采样率非零时必须指定）")
+	}
+
+	return nil
 }
 
 // MilvusConfig Milvus 向量数据库配置

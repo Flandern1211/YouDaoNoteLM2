@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
@@ -37,6 +38,8 @@ type chatAgentService struct {
 	summaryCache     *cache.SourceSummaryCache
 	cancelFuncs      sync.Map
 	encryptionKey    []byte
+	// contextMiddleware 上下文管理中间件（W4，可选）
+	contextMiddleware adk.ChatModelAgentMiddleware
 }
 
 // NewChatAgentService 创建 Agent 对话服务
@@ -60,6 +63,12 @@ func NewChatAgentService(
 		summaryCache:     summaryCache,
 		encryptionKey:    []byte(encryptionKey),
 	}
+}
+
+// WithContextMiddleware 设置上下文管理中间件（W4 集成）。
+// 在 createChatAgent 时注入到 ChatAgentBuilder。
+func (s *chatAgentService) WithContextMiddleware(m adk.ChatModelAgentMiddleware) {
+	s.contextMiddleware = m
 }
 
 // ProcessMessageWithAgent 使用 Agent 处理消息
@@ -252,15 +261,21 @@ func (s *chatAgentService) createChatAgent(ctx context.Context, llmConfig *entit
 	logger.Debug("[Agent] AI 模型创建成功，开始创建 ChatAgent")
 
 	// 使用 Builder 模式构建 ChatAgent
-	agent, err := chat.NewChatAgentBuilder(ctx).
+	builder := chat.NewChatAgentBuilder(ctx).
 		WithLLM(chatModel).
 		WithUserID(userID).
 		WithSources(sourceIDs, sourceNames).
 		WithRetriever(s.retriever).
 		WithSourceRepo(s.sourceRepo).
 		WithSummaryCache(s.summaryCache).
-		WithContextRepos(s.conversationRepo, s.messageRepo, s.cache).
-		Build()
+		WithContextRepos(s.conversationRepo, s.messageRepo, s.cache)
+
+	// 注入上下文管理中间件（W4 集成，可选）
+	if s.contextMiddleware != nil {
+		builder = builder.WithContextMiddleware(s.contextMiddleware)
+	}
+
+	agent, err := builder.Build()
 	if err != nil {
 		logger.Error("[Agent] 创建 ChatAgent 失败", zap.Error(err))
 		return nil, err

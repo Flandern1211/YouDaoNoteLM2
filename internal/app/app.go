@@ -2,6 +2,9 @@ package app
 
 import (
 	searchAgent "YoudaoNoteLm/internal/agent/search"
+	"YoudaoNoteLm/internal/agentcontext"
+	agentcontextAdapter "YoudaoNoteLm/internal/agentcontext/adapter"
+	agentcontextEino "YoudaoNoteLm/internal/agentcontext/eino"
 	"YoudaoNoteLm/internal/api"
 	"YoudaoNoteLm/internal/model/entity"
 	"YoudaoNoteLm/internal/rag"
@@ -31,6 +34,7 @@ import (
 	_ "YoudaoNoteLm/internal/service/external/llm"
 	_ "YoudaoNoteLm/internal/service/external/search"
 
+	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -302,6 +306,9 @@ func (a *App) initDependencies() {
 	logger.Info("ChatAgentService 初始化成功")
 	logger.Info("ConversationService 初始化成功")
 
+	// 构造 Agent 上下文管理依赖（W4 集成）
+	a.initAgentContext(chatAgentSvc)
+
 	a.router = api.NewRouter(
 		userSvc,
 		authSvc,
@@ -323,6 +330,59 @@ func (a *App) initDependencies() {
 		minioStorage,
 		userRepo,
 	)
+}
+
+// initAgentContext 构造 Agent 上下文管理依赖（W4 集成）。
+// 构造不可变 Registry、Provider、ContextCompiler 和 Eino Middleware，
+// 通过构造参数注入 ChatAgentService，不使用包级 mutable singleton。
+// Legacy 默认路径在依赖缺失时仍可启动。
+func (a *App) initAgentContext(chatAgentSvc service.ChatAgentService) {
+	// 1. 构造不可变 Profile Registry
+	registry, err := agentcontext.NewRegistry(
+		[]agentcontext.ContextProfile{
+			agentcontext.NewChatV1Profile(),
+			agentcontext.NewMainV1Profile(),
+			agentcontext.NewSearchV1Profile(),
+		},
+		nil, // 模型能力通过 resolver 动态解析
+	)
+	if err != nil {
+		logger.Warn("Agent 上下文 Registry 初始化失败，Legacy 模式仍可用", zap.Error(err))
+		return
+	}
+
+	// 2. 构造 Provider 适配器
+	promptProvider := agentcontextAdapter.NewStaticPromptProvider(nil) // 无资料列表查找
+	historyProvider := agentcontextAdapter.NewLegacyHistoryProvider(nil, nil, nil)
+	memoryProvider := agentcontextAdapter.NewDisabledMemoryProvider()
+	modelResolver := agentcontextAdapter.NewRegistryModelCapabilitiesResolver(registry)
+
+	// 3. 构造 Token 计数器
+	tokenCounter := agentcontextAdapter.NewConservativeTokenCounter()
+
+	// 4. 构造 ContextCompiler（使用 PrepareTurn + CompileModelInput 的组合实现）
+	// W4 默认使用 legacy 模式，ContextMiddleware 不修改 state
+	_ = promptProvider
+	_ = historyProvider
+	_ = memoryProvider
+	_ = modelResolver
+	_ = tokenCounter
+
+	// 5. 构造 ContextMiddleware（默认 legacy 模式）
+	contextMiddleware := agentcontextEino.NewContextMiddleware(agentcontextEino.ContextMiddlewareConfig{
+		Compiler: nil, // Legacy 模式不需要 compiler
+		Mode:     agentcontextEino.ContextModeLegacy,
+	})
+
+	// 6. 注入到 ChatAgentService（类型断言检查是否支持 WithContextMiddleware）
+	type contextMiddlewareInjector interface {
+		WithContextMiddleware(m adk.ChatModelAgentMiddleware)
+	}
+	if injector, ok := chatAgentSvc.(contextMiddlewareInjector); ok {
+		injector.WithContextMiddleware(contextMiddleware)
+	}
+
+	logger.Info("Agent 上下文管理依赖初始化成功（Legacy 模式）")
 }
 
 // initIngestionService 初始化入库服务

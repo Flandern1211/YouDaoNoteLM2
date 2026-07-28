@@ -42,6 +42,9 @@ type ChatAgentBuilder struct {
 	messageRepo      repository.MessageRepository
 	chatCache        *cache.ChatCache
 	userID           uint
+
+	// 上下文管理中间件（可选，W4 集成）
+	contextMiddleware adk.ChatModelAgentMiddleware
 }
 
 // NewChatAgentBuilder 创建构建器
@@ -114,6 +117,13 @@ func (b *ChatAgentBuilder) WithMaxIterations(n int) *ChatAgentBuilder {
 	return b
 }
 
+// WithContextMiddleware 设置上下文管理中间件（W4 集成）。
+// 中间件按注册顺序执行：context compiler → metrics → 其他业务 handler。
+func (b *ChatAgentBuilder) WithContextMiddleware(m adk.ChatModelAgentMiddleware) *ChatAgentBuilder {
+	b.contextMiddleware = m
+	return b
+}
+
 // WithTool 添加自定义工具（可多次调用）
 func (b *ChatAgentBuilder) WithTool(t tool.BaseTool) *ChatAgentBuilder {
 	b.tools = append(b.tools, t)
@@ -147,7 +157,14 @@ func (b *ChatAgentBuilder) Build() (*ChatAgent, error) {
 	// 2. 构建系统提示词
 	systemPrompt := b.buildSystemPrompt()
 
-	// 3. 创建 ChatModelAgent
+	// 3. 构建 Handler 列表（固定注册顺序：context compiler → metrics → 其他）
+	var handlers []adk.ChatModelAgentMiddleware
+	if b.contextMiddleware != nil {
+		handlers = append(handlers, b.contextMiddleware)
+	}
+	handlers = append(handlers, newMetricsHandler())
+
+	// 4. 创建 ChatModelAgent
 	agent, err := adk.NewChatModelAgent(b.ctx, &adk.ChatModelAgentConfig{
 		Model:       b.llmModel,
 		Instruction: systemPrompt,
@@ -158,12 +175,13 @@ func (b *ChatAgentBuilder) Build() (*ChatAgent, error) {
 		},
 		MaxIterations:    b.maxIterations,
 		ModelRetryConfig: buildRetryConfig(),
+		Handlers:         handlers,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("创建 ChatModelAgent 失败: %w", err)
 	}
 
-	// 4. 构建上下文构建器
+	// 5. 构建上下文构建器
 	contextBuilder := NewContextBuilder(b.conversationRepo, b.messageRepo, b.chatCache)
 
 	return &ChatAgent{

@@ -102,7 +102,7 @@ func (a *ChatAgent) Process(ctx context.Context, conversationID uint, content st
 			refs := make([]response.Reference, 0, len(results))
 			for _, r := range results {
 				refs = append(refs, response.Reference{
-					SourceName:    r.URL,
+					SourceName:   r.URL,
 					ChunkContent: r.Snippet,
 					Score:        float32(r.Score),
 				})

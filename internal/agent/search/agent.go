@@ -8,6 +8,7 @@ import (
 	"time"
 
 	agentTools "YoudaoNoteLm/internal/agent/tools"
+	"YoudaoNoteLm/internal/agentcontext"
 	"YoudaoNoteLm/internal/llm"
 	"YoudaoNoteLm/internal/service"
 	"YoudaoNoteLm/pkg/config"
@@ -240,6 +241,19 @@ func buildRetryConfig() *adk.ModelRetryConfig {
 			return &adk.RetryDecision{Retry: false}
 		},
 	}
+}
+
+// ExecuteWithSearchTask 使用 SearchTask 执行搜索任务（非流式）。
+// W4 集成：内部接口从裸 string 改为 agentcontext.SearchTask。
+// 外部 API 继续使用 string，在边界映射为 SearchTask。
+func (a *SearchAgent) ExecuteWithSearchTask(ctx context.Context, userID, notebookID uint, searchTask agentcontext.SearchTask) (*service.SearchAgentResult, error) {
+	return a.Execute(ctx, userID, notebookID, searchTask.Query)
+}
+
+// ExecuteStreamWithSearchTask 使用 SearchTask 流式执行搜索任务。
+// W4 集成：内部接口从裸 string 改为 agentcontext.SearchTask。
+func (a *SearchAgent) ExecuteStreamWithSearchTask(ctx context.Context, userID, notebookID uint, searchTask agentcontext.SearchTask) <-chan *service.SearchAgentEvent {
+	return a.ExecuteStream(ctx, userID, notebookID, searchTask.Query)
 }
 
 // Execute 执行搜索任务（非流式）

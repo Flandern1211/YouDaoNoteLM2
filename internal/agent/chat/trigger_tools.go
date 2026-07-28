@@ -11,6 +11,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 
+	"YoudaoNoteLm/internal/agentcontext"
 	"YoudaoNoteLm/internal/repository"
 	bizerrors "YoudaoNoteLm/pkg/errors"
 	"YoudaoNoteLm/pkg/logger"
@@ -118,11 +119,15 @@ func (t *triggerSearchTool) RunQuery(ctx context.Context, query string) (string,
 		return "", fmt.Errorf("搜索关键词不能为空")
 	}
 
+	// W4 集成：将 string 映射为 SearchTask（在边界转换）
+	searchTask := agentcontext.SearchTask{Query: query}
+	_ = searchTask // 标记已映射，实际使用见下方
+
 	bgEventCh := getBgEventCh(ctx)
 	bgWg := GetBgWaitGroup(ctx)
 	runCtx := context.WithoutCancel(ctx)
 	runCtx, cancel := context.WithTimeout(runCtx, 3*time.Minute)
-	eventCh := t.executor.ExecuteStream(runCtx, t.userID, t.notebookID, query)
+	eventCh := t.executor.ExecuteStream(runCtx, t.userID, t.notebookID, searchTask.Query)
 
 	firstEvt, ok := <-eventCh
 	if !ok {
