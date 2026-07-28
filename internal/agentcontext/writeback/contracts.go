@@ -49,9 +49,10 @@ type AssistantWriteRequest struct {
 	Ticket      FinalizationTicket
 	Authority   agentcontext.ActiveExecutionAuthority
 
-	RunID          uint
+	RunID          string
 	ConversationID uint
 	UserID         uint
+	UserContent    string
 	Content        string
 	References     []byte // JSON 编码的引用
 	IdempotencyKey string
@@ -111,6 +112,7 @@ type ManifestWriteRequest struct {
 	Ticket      FinalizationTicket
 
 	Manifest       agentcontext.ContextManifest
+	ModelCallID    string
 	TurnStatus     string
 	IdempotencyKey string
 }
@@ -121,7 +123,7 @@ type StepResultWriteRequest struct {
 	Ticket      FinalizationTicket
 	Authority   agentcontext.ActiveExecutionAuthority
 
-	RunID          uint
+	RunID          string
 	StepID         string
 	UserID         uint
 	Result         interface{}

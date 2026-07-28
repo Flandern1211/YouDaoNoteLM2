@@ -3,6 +3,7 @@ package agentcontext
 import (
 	"testing"
 
+	"github.com/cloudwego/eino/schema"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -141,4 +142,27 @@ func TestGenerateManifestFingerprint_DifferentManifests(t *testing.T) {
 	fp1 := f.GenerateManifestFingerprint(manifest1)
 	fp2 := f.GenerateManifestFingerprint(manifest2)
 	assert.NotEqual(t, fp1.Fingerprint, fp2.Fingerprint, "不同 Manifest 应产生不同指纹")
+}
+
+func TestGenerateCompiledFingerprint_ContentSensitiveWithoutPlaintext(t *testing.T) {
+	f := NewContextFingerprinter("test-salt")
+	manifest := ContextManifest{
+		ProfileID:      "chat",
+		ProfileVersion: "v1",
+	}
+
+	fp1 := f.GenerateCompiledFingerprint(
+		manifest,
+		[]*schema.Message{schema.UserMessage("first secret")},
+		nil,
+	)
+	fp2 := f.GenerateCompiledFingerprint(
+		manifest,
+		[]*schema.Message{schema.UserMessage("second secret")},
+		nil,
+	)
+
+	assert.NotEqual(t, fp1.Fingerprint, fp2.Fingerprint)
+	assert.NotContains(t, fp1.Fingerprint, "first secret")
+	assert.Len(t, fp1.Fingerprint, 64)
 }

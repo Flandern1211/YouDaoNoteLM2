@@ -274,7 +274,7 @@ func TestTurnLifecycleCoordinator_FinalizeTurn_NilWriters(t *testing.T) {
 		FinalizeKey: agentcontext.FinalizeKey{RunID: "run-1", Revision: 1},
 	})
 
-	require.NoError(t, err)
+	require.Error(t, err)
 	assert.NotNil(t, result)
 }
 
@@ -301,7 +301,8 @@ func TestTurnLifecycleCoordinator_FinalizeTurn_Search_Success(t *testing.T) {
 			},
 		},
 		Outcome: agentcontext.TurnOutcome{
-			Status: agentcontext.TurnStatusSuccess,
+			Status:        agentcontext.TurnStatusSuccess,
+			PrimaryOutput: agentcontext.StepOutput{Result: "done"},
 		},
 		FinalizeKey: agentcontext.FinalizeKey{RunID: "run-1", Revision: 1},
 	})
@@ -310,4 +311,147 @@ func TestTurnLifecycleCoordinator_FinalizeTurn_Search_Success(t *testing.T) {
 	assert.Equal(t, 1, stepWriter.calls)
 	assert.Equal(t, 1, manifestWriter.calls)
 	assert.NotNil(t, result)
+}
+
+func TestTurnLifecycleCoordinator_FinalizeTurn_PrimaryFailureStopsDerivedWrites(t *testing.T) {
+	assistantWriter := &mockAssistantWriter{err: assert.AnError}
+	summaryWriter := &mockSummaryWriter{}
+	memoryWriter := &mockMemoryWriter{}
+	manifestWriter := &mockManifestWriter{}
+	coordinator := NewTurnLifecycleCoordinator(CoordinatorConfig{
+		Verifier: &mockVerifier{},
+		Writers: WriterRegistry{
+			Assistant: assistantWriter,
+			Summary:   summaryWriter,
+			Memory:    memoryWriter,
+			Manifest:  manifestWriter,
+		},
+	})
+
+	_, err := coordinator.FinalizeTurn(context.Background(), agentcontext.FinalizeRequest{
+		Turn: &agentcontext.PreparedTurn{
+			Session: &agentcontext.TurnSession{
+				Handle: agentcontext.AcceptedTurnHandle{RunID: "run-1"},
+			},
+			Profile: agentcontext.ContextProfileSnapshot{
+				Key:             agentcontext.ChatV1,
+				WritebackPolicy: agentcontext.WritebackPolicyConversationTurn,
+			},
+		},
+		Outcome: agentcontext.TurnOutcome{
+			Status: agentcontext.TurnStatusSuccess,
+			PrimaryOutput: agentcontext.ConversationOutput{
+				FinalMessage: schema.AssistantMessage("hello", nil),
+			},
+		},
+		FinalizeKey: agentcontext.FinalizeKey{RunID: "run-1", Revision: 1},
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, assistantWriter.calls)
+	assert.Zero(t, summaryWriter.calls)
+	assert.Zero(t, memoryWriter.calls)
+	assert.Zero(t, manifestWriter.calls)
+}
+
+func TestTurnLifecycleCoordinator_FinalizeTurn_LegacyOwnerWritesManifestOnly(t *testing.T) {
+	assistantWriter := &mockAssistantWriter{}
+	manifestWriter := &mockManifestWriter{}
+	coordinator := NewTurnLifecycleCoordinator(CoordinatorConfig{
+		Verifier: &mockVerifier{},
+		Writers: WriterRegistry{
+			Assistant: assistantWriter,
+			Manifest:  manifestWriter,
+		},
+	})
+
+	_, err := coordinator.FinalizeTurn(context.Background(), agentcontext.FinalizeRequest{
+		Turn: &agentcontext.PreparedTurn{
+			Session: &agentcontext.TurnSession{
+				Handle: agentcontext.AcceptedTurnHandle{
+					RunID: "run-1",
+					ContextMode: agentcontext.ContextModeSnapshot{
+						WritebackOwner: "legacy",
+					},
+				},
+			},
+			Profile: agentcontext.ContextProfileSnapshot{
+				Key:             agentcontext.ChatV1,
+				WritebackPolicy: agentcontext.WritebackPolicyConversationTurn,
+			},
+		},
+		Outcome: agentcontext.TurnOutcome{
+			Status: agentcontext.TurnStatusSuccess,
+			PrimaryOutput: agentcontext.ConversationOutput{
+				FinalMessage: schema.AssistantMessage("hello", nil),
+			},
+		},
+		FinalizeKey: agentcontext.FinalizeKey{RunID: "run-1", Revision: 1},
+	})
+
+	require.NoError(t, err)
+	assert.Zero(t, assistantWriter.calls)
+	assert.Equal(t, 1, manifestWriter.calls)
+}
+
+func TestTurnLifecycleCoordinator_FinalizeTurn_PersistsEveryCompileRecord(t *testing.T) {
+	manifestWriter := &mockManifestWriter{}
+	coordinator := NewTurnLifecycleCoordinator(CoordinatorConfig{
+		Verifier: &mockVerifier{},
+		Writers: WriterRegistry{
+			Manifest: manifestWriter,
+		},
+	})
+
+	_, err := coordinator.FinalizeTurn(context.Background(), agentcontext.FinalizeRequest{
+		Turn: &agentcontext.PreparedTurn{
+			Session: &agentcontext.TurnSession{
+				Handle: agentcontext.AcceptedTurnHandle{
+					RunID: "run-1",
+					ContextMode: agentcontext.ContextModeSnapshot{
+						WritebackOwner: "legacy",
+					},
+				},
+			},
+			Profile: agentcontext.ContextProfileSnapshot{
+				Key:             agentcontext.ChatV1,
+				WritebackPolicy: agentcontext.WritebackPolicyConversationTurn,
+			},
+		},
+		Outcome: agentcontext.TurnOutcome{Status: agentcontext.TurnStatusSuccess},
+		CompileRecords: []agentcontext.CompileRecord{
+			{ModelCallID: "call-1"},
+			{ModelCallID: "call-2"},
+		},
+		FinalizeKey: agentcontext.FinalizeKey{RunID: "run-1", Revision: 1},
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, manifestWriter.calls)
+}
+
+func TestTurnLifecycleCoordinator_FinalizeTurn_ManifestFailureIsTerminalizationError(t *testing.T) {
+	coordinator := NewTurnLifecycleCoordinator(CoordinatorConfig{
+		Verifier: &mockVerifier{},
+		Writers: WriterRegistry{
+			Manifest: &mockManifestWriter{err: assert.AnError},
+		},
+	})
+
+	result, err := coordinator.FinalizeTurn(context.Background(), agentcontext.FinalizeRequest{
+		Turn: &agentcontext.PreparedTurn{
+			Session: &agentcontext.TurnSession{
+				Handle: agentcontext.AcceptedTurnHandle{RunID: "run-1"},
+			},
+			Profile: agentcontext.ContextProfileSnapshot{
+				Key:             agentcontext.ChatV1,
+				WritebackPolicy: agentcontext.WritebackPolicyConversationTurn,
+			},
+		},
+		Outcome:     agentcontext.TurnOutcome{Status: agentcontext.TurnStatusFailed},
+		FinalizeKey: agentcontext.FinalizeKey{RunID: "run-1", Revision: 1},
+	})
+
+	require.Error(t, err)
+	assert.Equal(t, agentcontext.WritebackStatusFailed, result.Manifest)
 }

@@ -229,11 +229,64 @@ func TestCompareRoleOrder_DifferentLength(t *testing.T) {
 	assert.False(t, compareRoleOrder(a, b))
 }
 
-func TestContextMiddleware_EnabledMode_Rejected(t *testing.T) {
-	// W4 不支持 enabled 模式，必须返回 nil
+func TestContextMiddleware_EnabledMode_RewritesMessages(t *testing.T) {
+	compiler := &mockCompiler{
+		compileResult: &agentcontext.CompiledContext{
+			Messages: []*schema.Message{schema.SystemMessage("compiled"), schema.UserMessage("hello")},
+			Record: agentcontext.CompileRecord{
+				ModelCallID: "call-1",
+			},
+		},
+	}
+	var recorded agentcontext.CompileRecord
 	middleware := NewContextMiddleware(ContextMiddlewareConfig{
-		Compiler: &mockCompiler{},
+		Compiler: compiler,
+		Mode:     ContextModeEnabled,
+		CompileRecordSink: func(_ string, record agentcontext.CompileRecord) {
+			recorded = record
+		},
+	})
+	require.NotNil(t, middleware)
+
+	turn := &agentcontext.PreparedTurn{
+		Session: &agentcontext.TurnSession{
+			Handle: agentcontext.AcceptedTurnHandle{RunID: "run-1"},
+		},
+	}
+	ctx := context.WithValue(context.Background(), contextCompilerKey{}, turn)
+	original := &adk.ChatModelAgentState{
+		Messages: []*schema.Message{schema.UserMessage("legacy")},
+	}
+
+	_, rewritten, err := middleware.BeforeModelRewriteState(ctx, original, nil)
+
+	require.NoError(t, err)
+	require.Len(t, rewritten.Messages, 2)
+	assert.Equal(t, "compiled", rewritten.Messages[0].Content)
+	assert.Len(t, original.Messages, 1, "不应原地修改 Eino state")
+	assert.Equal(t, "call-1", recorded.ModelCallID)
+}
+
+func TestContextMiddleware_EnabledMode_CompileErrorStopsModel(t *testing.T) {
+	middleware := NewContextMiddleware(ContextMiddlewareConfig{
+		Compiler: &mockCompiler{compileErr: assert.AnError},
 		Mode:     ContextModeEnabled,
 	})
-	assert.Nil(t, middleware, "enabled 模式在 W4 应该被拒绝")
+	turn := &agentcontext.PreparedTurn{
+		Session: &agentcontext.TurnSession{
+			Handle: agentcontext.AcceptedTurnHandle{RunID: "run-1"},
+		},
+	}
+	ctx := context.WithValue(context.Background(), contextCompilerKey{}, turn)
+	state := &adk.ChatModelAgentState{Messages: []*schema.Message{schema.UserMessage("legacy")}}
+
+	_, unchanged, err := middleware.BeforeModelRewriteState(ctx, state, nil)
+
+	require.Error(t, err)
+	assert.Same(t, state, unchanged)
+}
+
+func TestContextMiddleware_NonLegacyRequiresCompiler(t *testing.T) {
+	assert.Nil(t, NewContextMiddleware(ContextMiddlewareConfig{Mode: ContextModeShadow}))
+	assert.Nil(t, NewContextMiddleware(ContextMiddlewareConfig{Mode: ContextModeEnabled}))
 }

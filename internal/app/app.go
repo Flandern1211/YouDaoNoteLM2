@@ -4,7 +4,8 @@ import (
 	searchAgent "YoudaoNoteLm/internal/agent/search"
 	"YoudaoNoteLm/internal/agentcontext"
 	agentcontextAdapter "YoudaoNoteLm/internal/agentcontext/adapter"
-	agentcontextEino "YoudaoNoteLm/internal/agentcontext/eino"
+	agentcontextHarness "YoudaoNoteLm/internal/agentcontext/harness"
+	"YoudaoNoteLm/internal/agentcontext/writeback"
 	"YoudaoNoteLm/internal/api"
 	"YoudaoNoteLm/internal/model/entity"
 	"YoudaoNoteLm/internal/rag"
@@ -21,6 +22,8 @@ import (
 	"YoudaoNoteLm/pkg/logger"
 	"YoudaoNoteLm/pkg/utils"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -34,7 +37,6 @@ import (
 	_ "YoudaoNoteLm/internal/service/external/llm"
 	_ "YoudaoNoteLm/internal/service/external/search"
 
-	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/embedding"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -76,7 +78,9 @@ func (a *App) Initialize() error {
 		return err
 	}
 
-	a.initDependencies()
+	if err := a.initDependencies(); err != nil {
+		return err
+	}
 	a.initRouter()
 	a.initServer()
 	return nil
@@ -131,7 +135,13 @@ func (a *App) initDatabase() error {
 		&entity.UserLLMConfig{},
 		&entity.YoudaoBinding{},
 		&entity.SysConfig{},
+		&agentcontextHarness.PersistentRun{},
+		&agentcontextHarness.PersistentManifest{},
+		&agentcontextHarness.PersistentWriteback{},
 	); err != nil {
+		if a.cfg.Agent.ContextManagement.GetMode() != "legacy" {
+			return fmt.Errorf("上下文 Harness 数据库迁移失败: %w", err)
+		}
 		logger.Warn("database migration failed", zap.Error(err))
 	}
 
@@ -182,7 +192,7 @@ func (a *App) verifyEncryptionKey() error {
 }
 
 // initDependencies 初始化依赖注入
-func (a *App) initDependencies() {
+func (a *App) initDependencies() error {
 	// 创建 Repository
 	userRepo := repository.NewUserRepository(a.mysqlDB)
 	notebookRepo := repository.NewNotebookRepository(a.mysqlDB)
@@ -306,8 +316,10 @@ func (a *App) initDependencies() {
 	logger.Info("ChatAgentService 初始化成功")
 	logger.Info("ConversationService 初始化成功")
 
-	// 构造 Agent 上下文管理依赖（W4 集成）
-	a.initAgentContext(chatAgentSvc)
+	// 构造 Agent 上下文管理依赖与最小 Harness
+	if err := a.initAgentContext(chatAgentSvc, conversationRepo, messageRepo, chatCache); err != nil {
+		return err
+	}
 
 	a.router = api.NewRouter(
 		userSvc,
@@ -330,13 +342,18 @@ func (a *App) initDependencies() {
 		minioStorage,
 		userRepo,
 	)
+	return nil
 }
 
-// initAgentContext 构造 Agent 上下文管理依赖（W4 集成）。
+// initAgentContext 构造 Agent 上下文管理依赖和最小持久化 Harness。
 // 构造不可变 Registry、Provider、ContextCompiler 和 Eino Middleware，
 // 通过构造参数注入 ChatAgentService，不使用包级 mutable singleton。
-// Legacy 默认路径在依赖缺失时仍可启动。
-func (a *App) initAgentContext(chatAgentSvc service.ChatAgentService) {
+func (a *App) initAgentContext(
+	chatAgentSvc service.ChatAgentService,
+	conversationRepo repository.ConversationRepository,
+	messageRepo repository.MessageRepository,
+	chatCache *cache.ChatCache,
+) error {
 	// 1. 构造不可变 Profile Registry
 	registry, err := agentcontext.NewRegistry(
 		[]agentcontext.ContextProfile{
@@ -344,45 +361,65 @@ func (a *App) initAgentContext(chatAgentSvc service.ChatAgentService) {
 			agentcontext.NewMainV1Profile(),
 			agentcontext.NewSearchV1Profile(),
 		},
-		nil, // 模型能力通过 resolver 动态解析
+		agentcontextAdapter.DefaultModelFixture(),
 	)
 	if err != nil {
-		logger.Warn("Agent 上下文 Registry 初始化失败，Legacy 模式仍可用", zap.Error(err))
-		return
+		return fmt.Errorf("初始化 Agent 上下文 Registry 失败: %w", err)
 	}
 
 	// 2. 构造 Provider 适配器
 	promptProvider := agentcontextAdapter.NewStaticPromptProvider(nil) // 无资料列表查找
-	historyProvider := agentcontextAdapter.NewLegacyHistoryProvider(nil, nil, nil)
+	historyProvider := agentcontextAdapter.NewLegacyHistoryProvider(
+		agentcontextAdapter.NewChatCacheBridge(chatCache),
+		conversationRepo,
+		messageRepo,
+	)
 	memoryProvider := agentcontextAdapter.NewDisabledMemoryProvider()
-	modelResolver := agentcontextAdapter.NewRegistryModelCapabilitiesResolver(registry)
+	modelResolver := agentcontextAdapter.NewConservativeModelCapabilitiesResolver(registry)
 
-	// 3. 构造 Token 计数器
-	tokenCounter := agentcontextAdapter.NewConservativeTokenCounter()
+	// 3. 构造 ContextCompiler 与 HMAC 指纹器
+	fingerprintSalt := a.cfg.Agent.ContextManagement.FingerprintSalt
+	if fingerprintSalt == "" {
+		digest := sha256.Sum256([]byte("agent-context-fingerprint:v1:" + a.cfg.Security.EncryptionKey))
+		fingerprintSalt = hex.EncodeToString(digest[:])
+	}
+	compiler := agentcontext.NewDefaultCompiler(agentcontext.PrepareTurnConfig{
+		Registry:        registry,
+		PromptProvider:  promptProvider,
+		HistoryProvider: historyProvider,
+		MemoryProvider:  memoryProvider,
+		ModelResolver:   modelResolver,
+	}, agentcontext.NewContextFingerprinter(fingerprintSalt), &agentcontext.NoopMetrics{})
 
-	// 4. 构造 ContextCompiler（使用 PrepareTurn + CompileModelInput 的组合实现）
-	// W4 默认使用 legacy 模式，ContextMiddleware 不修改 state
-	_ = promptProvider
-	_ = historyProvider
-	_ = memoryProvider
-	_ = modelResolver
-	_ = tokenCounter
-
-	// 5. 构造 ContextMiddleware（默认 legacy 模式）
-	contextMiddleware := agentcontextEino.NewContextMiddleware(agentcontextEino.ContextMiddlewareConfig{
-		Compiler: nil, // Legacy 模式不需要 compiler
-		Mode:     agentcontextEino.ContextModeLegacy,
+	// 4. 构造 MySQL Store；Assistant 与 Manifest 均使用稳定幂等键。
+	store := agentcontextHarness.NewGormStore(a.mysqlDB, chatCache)
+	runtime, err := agentcontextHarness.NewRuntime(agentcontextHarness.RuntimeConfig{
+		ContextConfig: a.cfg.Agent.ContextManagement,
+		Registry:      registry,
+		Compiler:      compiler,
+		Store:         store,
+		Writers: writeback.WriterRegistry{
+			Assistant: store,
+			Manifest:  store,
+		},
 	})
-
-	// 6. 注入到 ChatAgentService（类型断言检查是否支持 WithContextMiddleware）
-	type contextMiddlewareInjector interface {
-		WithContextMiddleware(m adk.ChatModelAgentMiddleware)
-	}
-	if injector, ok := chatAgentSvc.(contextMiddlewareInjector); ok {
-		injector.WithContextMiddleware(contextMiddleware)
+	if err != nil {
+		return fmt.Errorf("初始化 Agent Context Harness 失败: %w", err)
 	}
 
-	logger.Info("Agent 上下文管理依赖初始化成功（Legacy 模式）")
+	// 5. 注入 ChatAgentService。运行模式按每个新 Run 固化，Legacy 默认不改变行为。
+	type contextRuntimeInjector interface {
+		WithContextRuntime(runtime *agentcontextHarness.Runtime)
+	}
+	if injector, ok := chatAgentSvc.(contextRuntimeInjector); ok {
+		injector.WithContextRuntime(runtime)
+	}
+
+	logger.Info("Agent 上下文管理初始化成功",
+		zap.String("mode", a.cfg.Agent.ContextManagement.GetMode()),
+		zap.Bool("writeback_enabled", a.cfg.Agent.ContextManagement.WritebackEnabled),
+	)
+	return nil
 }
 
 // initIngestionService 初始化入库服务

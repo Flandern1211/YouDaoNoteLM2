@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 // FingerprintSchemaVersion 指纹 schema 版本
@@ -127,4 +130,63 @@ func (f *ContextFingerprinter) GenerateManifestFingerprint(manifest ContextManif
 		SchemaVersion: FingerprintSchemaVersion,
 		Fingerprint:   f.Generate(input),
 	}
+}
+
+// GenerateCompiledFingerprint 对实际模型输入生成 HMAC。
+// 原文只进入进程内 HMAC，不写入 Manifest 或日志。
+func (f *ContextFingerprinter) GenerateCompiledFingerprint(
+	manifest ContextManifest,
+	messages []*schema.Message,
+	toolInfos []*schema.ToolInfo,
+) ManifestFingerprint {
+	mac := hmac.New(sha256.New, []byte(f.salt))
+	writeFingerprintPart(mac, f.canonicalize(FingerprintInput{
+		ProfileID:      manifest.ProfileID,
+		ProfileVersion: manifest.ProfileVersion,
+		PromptVersion:  manifest.PromptVersion,
+		ToolsetVersion: manifest.ToolsetVersion,
+		Model:          manifest.Model,
+		Mode:           manifest.TurnStatus,
+		CounterMode:    manifest.CounterMode,
+	}))
+	for _, message := range messages {
+		if message == nil {
+			writeFingerprintPart(mac, "<nil-message>")
+			continue
+		}
+		writeFingerprintPart(mac, string(message.Role))
+		writeFingerprintPart(mac, message.Content)
+		writeFingerprintPart(mac, message.ToolCallID)
+		for _, call := range message.ToolCalls {
+			writeFingerprintPart(mac, call.ID)
+			writeFingerprintPart(mac, call.Function.Name)
+			writeFingerprintPart(mac, call.Function.Arguments)
+		}
+	}
+
+	toolNames := make([]string, 0, len(toolInfos))
+	for _, toolInfo := range toolInfos {
+		if toolInfo != nil {
+			toolNames = append(toolNames, toolInfo.Name)
+		}
+	}
+	sort.Strings(toolNames)
+	for _, name := range toolNames {
+		writeFingerprintPart(mac, name)
+	}
+
+	return ManifestFingerprint{
+		SchemaVersion: FingerprintSchemaVersion,
+		Fingerprint:   hex.EncodeToString(mac.Sum(nil)),
+	}
+}
+
+type fingerprintWriter interface {
+	Write([]byte) (int, error)
+}
+
+func writeFingerprintPart(writer fingerprintWriter, value string) {
+	_, _ = writer.Write([]byte(strconv.Itoa(len(value))))
+	_, _ = writer.Write([]byte{':'})
+	_, _ = writer.Write([]byte(value))
 }

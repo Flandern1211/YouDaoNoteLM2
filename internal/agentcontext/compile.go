@@ -46,7 +46,7 @@ func CompileModelInput(
 			PromptVersion:   turn.BaseManifest.PromptVersion,
 			ToolsetVersion:  calculateToolsetVersion(toolInfos),
 			Model:           turn.BaseManifest.Model,
-			InputBudget:     result.BeforeTokens,
+			InputBudget:     calculateInputBudget(turn.Profile.Budget, ModelRef{}),
 			EstimatedTokens: result.AfterTokens,
 			CounterMode:     string(result.CounterMode),
 			TurnStatus:      turn.BaseManifest.TurnStatus,

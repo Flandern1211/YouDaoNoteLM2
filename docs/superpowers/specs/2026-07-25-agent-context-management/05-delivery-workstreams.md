@@ -26,6 +26,14 @@ W7 灰度启用与旧路径收敛
 
 MemoryProvider/MemoryWriter 的真实记忆算法不属于本项目上下文模块首期交付；W2/W5 只完成接口、调度能力和未配置时的明确行为。
 
+### 2026-07-28 最小 Harness 实施决定
+
+- W0–W4、W5a 和 W6a 已完成。
+- 用户批准 W5b/W6b 采用单进程同步最小 Harness 完成 Chat 闭环。
+- 最小 Harness 使用 MySQL 固化 ContextMode、WritebackOwner、Profile、Authority、revision 和终态，并持久化无正文 Manifest。
+- Enabled 的 Assistant 写入与幂等 Journal 在同一数据库事务中完成；Legacy/Shadow 继续由旧写回路径拥有主结果。
+- 本阶段不实现 Queue/Worker、Lease、Checkpoint Resume、NATS、后台 Repair Scanner、多实例接管或 Search StepResult 持久化；这些能力不得被最小 Harness 的完成状态替代。
+
 ## 3. W0：现有行为基线与 Eino 契约
 
 **当前状态：进行中。**
@@ -212,7 +220,7 @@ PrepareTurn 能为三个 Profile 产生确定性的 MessagePlan，且不写回�
 
 ## 8. W5：生命周期与写回协调
 
-**前置条件：阻塞于 `2026-07-16-agent-harness-design.md` 获得用户批准，并至少具备持久化 Run、AcceptedTurnHandle、Worker claim、Authority、FinalizationTicket 和事务性 Outbox/Journal。当前仓库不满足该条件。**
+**实施状态：W5a 协调核心已完成；W5b 按 2026-07-28 用户批准实现最小单进程 Harness。完整 Worker claim、Outbox/Repair、暂停恢复和多实例能力仍保留为后续前置条件。**
 
 ### 范围
 
@@ -255,6 +263,8 @@ PrepareTurn 能为三个 Profile 产生确定性的 MessagePlan，且不写回�
 任意终态都能产生确定、可重试、可观测的 FinalizeResult，且 ContextCompiler 不依赖 Repository、Outbox、Lease 或 Fencing 实现；TurnLifecycleCoordinator 只依赖窄验证与 Writer 端口。
 
 ## 9. W6：Manifest、Shadow 和可观测性
+
+**实施状态：W6a 配置、分桶、指纹和指标端口已完成；W6b 已接入 MySQL Manifest、请求级模式快照和 Enabled/Legacy 写回互斥。完整指标后端和跨进程 Repair 仍待后续 Harness。**
 
 ### 范围
 

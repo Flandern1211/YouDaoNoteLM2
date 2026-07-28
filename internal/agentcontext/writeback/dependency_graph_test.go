@@ -85,6 +85,7 @@ func TestWritebackGraph_GetRequiredOperations(t *testing.T) {
 
 	required := graph.GetRequiredOperations()
 	assert.Contains(t, required, WritebackOperationAssistant)
+	assert.Contains(t, required, WritebackOperationManifest)
 	assert.NotContains(t, required, WritebackOperationSummary)
 	assert.NotContains(t, required, WritebackOperationMemory)
 }
@@ -98,7 +99,7 @@ func TestWritebackGraph_CanSkip(t *testing.T) {
 	assert.False(t, graph.CanSkip(WritebackOperationAssistant))
 	assert.True(t, graph.CanSkip(WritebackOperationSummary))
 	assert.True(t, graph.CanSkip(WritebackOperationMemory))
-	assert.True(t, graph.CanSkip(WritebackOperationManifest))
+	assert.False(t, graph.CanSkip(WritebackOperationManifest))
 	assert.True(t, graph.CanSkip("unknown"))
 }
 

@@ -178,6 +178,9 @@ func buildMessagesFromPlan(instruction string, plan MessagePlan, toolInfos []*sc
 		}
 	}
 
+	// 运行中消息必须位于当前输入之后，保持 ToolCall/ToolResult 协议顺序。
+	messages = append(messages, plan.RuntimeMessages...)
+
 	return messages
 }
 

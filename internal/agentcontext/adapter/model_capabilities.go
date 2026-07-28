@@ -21,6 +21,39 @@ type RegistryModelCapabilitiesResolver struct {
 	overrides map[string]agentcontext.ModelCapabilities
 }
 
+// ConservativeModelCapabilitiesResolver 优先使用 Registry，
+// 对用户自定义模型使用最小 Harness 的保守能力快照。
+type ConservativeModelCapabilitiesResolver struct {
+	registry *agentcontext.Registry
+}
+
+func NewConservativeModelCapabilitiesResolver(
+	registry *agentcontext.Registry,
+) *ConservativeModelCapabilitiesResolver {
+	return &ConservativeModelCapabilitiesResolver{registry: registry}
+}
+
+func (r *ConservativeModelCapabilitiesResolver) ResolveModel(
+	_ context.Context,
+	ref agentcontext.ModelRef,
+) (agentcontext.ModelCapabilities, error) {
+	if ref.Provider == "" || ref.ModelID == "" {
+		return agentcontext.ModelCapabilities{}, agentcontext.NewError(
+			agentcontext.ErrCodeModelUnknown,
+			"模型 Provider 和 ModelID 不能为空",
+		)
+	}
+	if caps, ok := r.registry.ResolveModel(ref); ok {
+		return caps, nil
+	}
+	return agentcontext.ModelCapabilities{
+		ContextWindow:     128000,
+		MaxOutputTokens:   4096,
+		TokenizerStrategy: agentcontext.TokenizerStrategyConservativeUTF8,
+		SupportsToolCalls: true,
+	}, nil
+}
+
 // NewRegistryModelCapabilitiesResolver 创建基于 Registry 的模型能力解析器
 func NewRegistryModelCapabilitiesResolver(registry *agentcontext.Registry) *RegistryModelCapabilitiesResolver {
 	return &RegistryModelCapabilitiesResolver{

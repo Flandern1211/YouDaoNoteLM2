@@ -38,6 +38,8 @@ type ContextMiddlewareConfig struct {
 	Mode ContextMode
 	// ShadowSink Shadow 比较记录的接收端（可选）
 	ShadowSink func(ShadowCompareRecord)
+	// CompileRecordSink 收集每次模型调用的编译记录（可选）
+	CompileRecordSink func(runID string, record agentcontext.CompileRecord)
 }
 
 // ContextMiddleware 实现 ChatModelAgentMiddleware，在每次模型调用前执行上下文编译。
@@ -47,14 +49,14 @@ type ContextMiddleware struct {
 	compiler   agentcontext.ContextCompiler
 	mode       ContextMode
 	shadowSink func(ShadowCompareRecord)
+	recordSink func(runID string, record agentcontext.CompileRecord)
 }
 
 // NewContextMiddleware 创建 ContextMiddleware。
-// enabled 模式在 W4 必须返回 nil，不能半启用。
+// shadow/enabled 模式必须配置 Compiler，避免半启用。
 func NewContextMiddleware(cfg ContextMiddlewareConfig) *ContextMiddleware {
-	// W4 不支持 enabled 模式，必须明确拒绝
-	if cfg.Mode == ContextModeEnabled {
-		logger.Error("[ContextMiddleware] enabled 模式在 W4 不可用，请使用 legacy 或 shadow")
+	if cfg.Mode != ContextModeLegacy && cfg.Compiler == nil {
+		logger.Error("[ContextMiddleware] shadow/enabled 模式缺少 Compiler")
 		return nil
 	}
 
@@ -63,6 +65,7 @@ func NewContextMiddleware(cfg ContextMiddlewareConfig) *ContextMiddleware {
 		compiler:                     cfg.Compiler,
 		mode:                         cfg.Mode,
 		shadowSink:                   cfg.ShadowSink,
+		recordSink:                   cfg.CompileRecordSink,
 	}
 }
 
@@ -82,9 +85,16 @@ func (m *ContextMiddleware) BeforeModelRewriteState(
 		return ctx, state, nil
 	}
 
-	switch m.mode {
+	mode := m.mode
+	if turn.Session != nil && turn.Session.Handle.ContextMode.Mode != "" {
+		mode = ContextMode(turn.Session.Handle.ContextMode.Mode)
+	}
+
+	switch mode {
 	case ContextModeShadow:
 		return m.handleShadow(ctx, state, turn)
+	case ContextModeEnabled:
+		return m.handleEnabled(ctx, state, turn)
 	default:
 		// Legacy 模式：不修改 state
 		return ctx, state, nil
@@ -118,6 +128,8 @@ func (m *ContextMiddleware) handleShadow(
 		return ctx, state, nil
 	}
 
+	m.recordCompile(turn, compiled.Record)
+
 	// 比较 Legacy 和 Shadow 结果
 	record := compareLegacyShadow(state.Messages, compiled.Messages, turn, compiled.Record)
 	if m.shadowSink != nil {
@@ -126,6 +138,35 @@ func (m *ContextMiddleware) handleShadow(
 
 	// Shadow 不修改 state，模型仍消费 Legacy 输入
 	return ctx, state, nil
+}
+
+// handleEnabled 使用新编译结果替换本次模型调用输入。
+func (m *ContextMiddleware) handleEnabled(
+	ctx context.Context,
+	state *adk.ChatModelAgentState,
+	turn *agentcontext.PreparedTurn,
+) (context.Context, *adk.ChatModelAgentState, error) {
+	compiled, err := m.compiler.CompileModelInput(ctx, agentcontext.CompileRequest{
+		Turn:              turn,
+		Messages:          state.Messages,
+		ToolInfos:         state.ToolInfos,
+		DeferredToolInfos: state.DeferredToolInfos,
+	})
+	if err != nil {
+		return ctx, state, fmt.Errorf("Enabled 上下文编译失败: %w", err)
+	}
+
+	m.recordCompile(turn, compiled.Record)
+	rewritten := *state
+	rewritten.Messages = compiled.Messages
+	return ctx, &rewritten, nil
+}
+
+func (m *ContextMiddleware) recordCompile(turn *agentcontext.PreparedTurn, record agentcontext.CompileRecord) {
+	if m.recordSink == nil || turn == nil || turn.Session == nil {
+		return
+	}
+	m.recordSink(turn.Session.Handle.RunID, record)
 }
 
 // ShadowCompareRecord Shadow 比较记录
@@ -214,6 +255,11 @@ func PrepareAndInject(
 		return ctx, nil, fmt.Errorf("PrepareTurn 失败: %w", err)
 	}
 	return context.WithValue(ctx, contextCompilerKey{}, turn), turn, nil
+}
+
+// WithPreparedTurn 将已准备的 Turn 注入 Agent invocation context。
+func WithPreparedTurn(ctx context.Context, turn *agentcontext.PreparedTurn) context.Context {
+	return context.WithValue(ctx, contextCompilerKey{}, turn)
 }
 
 // getPreparedTurnFromContext 从 context 中获取 PreparedTurn。

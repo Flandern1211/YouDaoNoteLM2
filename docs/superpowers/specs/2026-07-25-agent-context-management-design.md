@@ -2,14 +2,14 @@
 
 ## 1. 文档状态
 
-- 状态：已批准；2026-07-27 根据现有代码复审补充落地边界
+- 状态：已批准；2026-07-28 批准以最小单进程 Harness 完成首期闭环
 - 日期：2026-07-25
 - 首期范围：Chat Agent、Main Agent、Search Agent
 - 方案：轻量 ContextCompiler + 可选 Harness 生命周期协调器 + Eino `ChatModelAgentMiddleware`
 
-本设计细化 `2026-07-16-agent-harness-design.md` 中的上下文管理部分，不替代其中的 Run、Checkpoint、Lease、NATS 或持久化 Harness 设计。该 Harness 文档当前仍是待审设计，仓库中也不存在 RunService、Worker 或持久化 Harness；因此本文把可立即落地的上下文编译能力与依赖未来 Harness 的生命周期协调明确拆开。
+本设计细化 `2026-07-16-agent-harness-design.md` 中的上下文管理部分，不替代其中完整的 Run、Checkpoint、Lease、NATS 或多实例 Harness 设计。2026-07-28 用户批准先实现最小单进程 Harness：使用 MySQL 持久化 Context Run、执行权版本、终态 revision、Assistant 幂等键和无正文 Manifest，同步完成 `Begin → Prepare/Compile → Finalize`；不在本阶段实现 Worker 调度、Lease 接管、Checkpoint Resume、NATS、后台 Repair Scanner 或多实例 fencing。
 
-首期先建立可替换的 Provider、按 Agent 隔离的装配策略、Token 预算和 Eino 接入点。执行后 Writer 协调属于后续 Harness 集成边界，只有 Harness 设计获批且具备持久化 Run/Authority/Outbox 后才能进入生产实现。
+首期先建立可替换的 Provider、按 Agent 隔离的装配策略、Token 预算和 Eino 接入点。最小 Harness 只保证当前 Chat 请求在单进程同步路径中的持久化 Run、Authority 校验、写回互斥和终态 Manifest；完整 Outbox/Repair、Search StepResult 持久化、暂停恢复和多实例接管仍属于后续 Harness 工作。
 
 ## 2. 目标
 
@@ -148,7 +148,7 @@ Eino 退出后，外层 Harness 在成功、失败、取消等所有终态调用
 | 子 Agent 记忆 | Main 最小披露，Search 不直接读取记忆库 |
 | 会话历史 | 带游标摘要 + 最近完整消息组 + Token 窗口 |
 | 入口用户消息 | RunService 在接受 Run 时可靠持久化 |
-| 执行后写回 | 未来 TurnLifecycleCoordinator 生成计划并调度 Writer；主结果与派生 intent 原子提交 |
+| 执行后写回 | 最小 Harness 已接入 TurnLifecycleCoordinator；完整派生 intent/Repair 仍待后续 Harness |
 | 摘要 | 运行内压缩与持久化会话摘要分离 |
 | Search 写回 | 保存 Step Result/Artifact，不写主会话 Assistant Message |
 | 恢复 | PreparedTurn 与 CompileRecord 随 checkpoint 恢复 |
@@ -162,8 +162,8 @@ Eino 退出后，外层 Harness 在成功、失败、取消等所有终态调用
 | 缓存 | 数据缓存归 Provider；Manager 只缓存版本化纯计算结果 |
 | 可观测 | 默认无正文 Manifest；受控诊断显式开启 |
 | 迁移 | `legacy` → `shadow` → `enabled` |
-| 当前阶段 | W0 进行中；静态 Eino 核对完成，基线与契约测试待实现 |
-| Harness 依赖 | W0–W4 可独立交付；W5–W7 等待 Harness 设计批准和基础能力 |
+| 当前阶段 | W0–W4、W5a/W5b、W6a/W6b 最小 Chat 闭环已完成；W7 与完整 Harness 待后续 |
+| Harness 依赖 | 最小单进程 Harness 已获批并落地；完整 Worker/Outbox/Repair/Resume/多实例能力仍待实施 |
 
 ## 8. 验收定义
 

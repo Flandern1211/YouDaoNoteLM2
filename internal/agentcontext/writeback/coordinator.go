@@ -11,7 +11,7 @@ import (
 )
 
 // TurnVerifier Turn 验证器端口。
-// 由未来 RunService/Harness 适配器实现。
+// 由最小 Harness 或未来完整 RunService 适配器实现。
 // 核心逻辑只消费验证结果，不了解查询实现。
 type TurnVerifier interface {
 	// VerifyAccepted 验证 AcceptedTurnHandle 对应持久化且未终止的 Run。
@@ -65,6 +65,9 @@ func (c *TurnLifecycleCoordinator) BeginTurn(
 	ctx context.Context,
 	req agentcontext.BeginTurnRequest,
 ) (*agentcontext.TurnSession, error) {
+	if c == nil || c.verifier == nil {
+		return nil, fmt.Errorf("TurnVerifier 未配置")
+	}
 	// 1. 验证 Handle
 	verified, err := c.verifier.VerifyAccepted(ctx, req.Handle)
 	if err != nil {
@@ -88,6 +91,13 @@ func (c *TurnLifecycleCoordinator) FinalizeTurn(
 	ctx context.Context,
 	req agentcontext.FinalizeRequest,
 ) (*agentcontext.FinalizeResult, error) {
+	if c == nil || c.verifier == nil {
+		return nil, fmt.Errorf("TurnVerifier 未配置")
+	}
+	if req.Turn == nil || req.Turn.Session == nil {
+		return nil, fmt.Errorf("PreparedTurn 或 TurnSession 不能为空")
+	}
+
 	// 1. 验证 Finalize 的 Authority
 	if err := c.verifier.VerifyAuthority(ctx, req.Turn.Session.Handle.RunID, req.Authority); err != nil {
 		return nil, fmt.Errorf("Finalize Authority 验证失败: %w", err)
@@ -96,6 +106,10 @@ func (c *TurnLifecycleCoordinator) FinalizeTurn(
 	// 2. 构建写回依赖图
 	policy := req.Turn.Profile.WritebackPolicy
 	graph := NewWritebackGraph(policy, req.Outcome.Status)
+	writebackOwner := req.Turn.Session.Handle.ContextMode.WritebackOwner
+	if writebackOwner != "" && writebackOwner != "context" {
+		graph = NewManifestOnlyGraph()
+	}
 
 	// 3. 生成执行计划
 	plan, err := graph.Plan()
@@ -110,13 +124,25 @@ func (c *TurnLifecycleCoordinator) FinalizeTurn(
 		Key: req.FinalizeKey,
 	}
 
+	var requiredErr error
+	failed := make(map[WritebackOperation]bool)
 	for _, stage := range plan.Stages {
 		for _, op := range stage {
-			c.executeWriteback(ctx, op, req, ticket, result, graph)
+			node := plan.Nodes[op]
+			if hasFailedDependency(node, failed) {
+				failed[op] = true
+				continue
+			}
+			if err := c.executeWriteback(ctx, op, req, ticket, result); err != nil {
+				failed[op] = true
+				if node.Required && requiredErr == nil {
+					requiredErr = err
+				}
+			}
 		}
 	}
 
-	return result, nil
+	return result, requiredErr
 }
 
 // executeWriteback 执行单个写回操作
@@ -126,22 +152,22 @@ func (c *TurnLifecycleCoordinator) executeWriteback(
 	req agentcontext.FinalizeRequest,
 	ticket FinalizationTicket,
 	result *agentcontext.FinalizeResult,
-	graph *WritebackGraph,
-) {
+) error {
 	idempotencyKey := fmt.Sprintf("%s-%d-%s", req.FinalizeKey.RunID, req.FinalizeKey.Revision, op)
 
 	switch op {
 	case WritebackOperationAssistant:
-		c.executeAssistant(ctx, req, ticket, idempotencyKey, result)
+		return c.executeAssistant(ctx, req, ticket, idempotencyKey, result)
 	case WritebackOperationStepResult:
-		c.executeStepResult(ctx, req, ticket, idempotencyKey, result)
+		return c.executeStepResult(ctx, req, ticket, idempotencyKey, result)
 	case WritebackOperationSummary:
-		c.executeSummary(ctx, req, ticket, idempotencyKey, result)
+		return c.executeSummary(ctx, req, ticket, idempotencyKey, result)
 	case WritebackOperationMemory:
-		c.executeMemory(ctx, req, ticket, idempotencyKey, result)
+		return c.executeMemory(ctx, req, ticket, idempotencyKey, result)
 	case WritebackOperationManifest:
-		c.executeManifest(ctx, req, ticket, idempotencyKey, result)
+		return c.executeManifest(ctx, req, ticket, idempotencyKey, result)
 	}
+	return nil
 }
 
 // executeAssistant 执行助手消息写入
@@ -151,30 +177,36 @@ func (c *TurnLifecycleCoordinator) executeAssistant(
 	ticket FinalizationTicket,
 	idempotencyKey string,
 	result *agentcontext.FinalizeResult,
-) {
+) error {
 	if c.writers.Assistant == nil {
-		result.Primary = nil
-		return
+		return fmt.Errorf("AssistantMessageWriter 未配置")
 	}
 
 	output, ok := req.Outcome.PrimaryOutput.(agentcontext.ConversationOutput)
-	if !ok {
-		logger.Warn("[Coordinator] 成功 Turn 缺少 ConversationOutput")
-		return
+	if !ok || output.FinalMessage == nil {
+		return fmt.Errorf("成功 Turn 缺少 ConversationOutput")
 	}
 
-	_, err := c.writers.Assistant.CommitAssistant(ctx, AssistantWriteRequest{
+	committed, err := c.writers.Assistant.CommitAssistant(ctx, AssistantWriteRequest{
 		FinalizeKey:    req.FinalizeKey,
 		Ticket:         ticket,
 		Authority:      req.Authority,
+		RunID:          req.Turn.Session.Handle.RunID,
+		ConversationID: req.Turn.Session.Handle.ConversationID,
+		UserID:         req.Turn.Session.Handle.UserID,
+		UserContent:    userInputContent(req.Turn.Session.Handle.Input),
 		Content:        output.FinalMessage.Content,
+		References:     output.Metadata,
 		IdempotencyKey: idempotencyKey,
 		ProfileID:      req.Turn.Profile.Key.Name,
+		Mode:           req.Turn.Session.Handle.ContextMode.Mode,
 	})
 	if err != nil {
 		logger.Error("[Coordinator] Assistant 写入失败", zap.Error(err))
-		// 主结果失败，后续派生操作跳过
+		return fmt.Errorf("Assistant 写入失败: %w", err)
 	}
+	result.Primary = committed
+	return nil
 }
 
 // executeStepResult 执行步骤结果写入
@@ -184,21 +216,33 @@ func (c *TurnLifecycleCoordinator) executeStepResult(
 	ticket FinalizationTicket,
 	idempotencyKey string,
 	result *agentcontext.FinalizeResult,
-) {
+) error {
 	if c.writers.StepResult == nil {
-		return
+		return fmt.Errorf("StepResultWriter 未配置")
 	}
 
-	_, err := c.writers.StepResult.CommitStepResult(ctx, StepResultWriteRequest{
+	output, ok := req.Outcome.PrimaryOutput.(agentcontext.StepOutput)
+	if !ok {
+		return fmt.Errorf("成功 Search Turn 缺少 StepOutput")
+	}
+
+	committed, err := c.writers.StepResult.CommitStepResult(ctx, StepResultWriteRequest{
 		FinalizeKey:    req.FinalizeKey,
 		Ticket:         ticket,
 		Authority:      req.Authority,
+		RunID:          req.Turn.Session.Handle.RunID,
+		StepID:         req.Turn.Session.Handle.StepID,
+		UserID:         req.Turn.Session.Handle.UserID,
+		Result:         output.Result,
 		IdempotencyKey: idempotencyKey,
 		ProfileID:      req.Turn.Profile.Key.Name,
 	})
 	if err != nil {
 		logger.Error("[Coordinator] StepResult 写入失败", zap.Error(err))
+		return fmt.Errorf("StepResult 写入失败: %w", err)
 	}
+	result.Primary = committed
+	return nil
 }
 
 // executeSummary 执行摘要写入
@@ -208,23 +252,26 @@ func (c *TurnLifecycleCoordinator) executeSummary(
 	ticket FinalizationTicket,
 	idempotencyKey string,
 	result *agentcontext.FinalizeResult,
-) {
+) error {
 	if c.writers.Summary == nil {
 		result.Summary = agentcontext.WritebackStatusSkipped
-		return
+		return nil
 	}
 
 	r, err := c.writers.Summary.EvaluateAndUpdate(ctx, SummaryWriteRequest{
 		FinalizeKey:    req.FinalizeKey,
 		Ticket:         ticket,
+		ConversationID: req.Turn.Session.Handle.ConversationID,
+		NewContent:     conversationOutputContent(req.Outcome.PrimaryOutput),
 		IdempotencyKey: idempotencyKey,
 	})
 	if err != nil {
 		logger.Warn("[Coordinator] Summary 写入失败", zap.Error(err))
 		result.Summary = agentcontext.WritebackStatusFailed
-		return
+		return err
 	}
 	result.Summary = agentcontext.WritebackStatus(r.Status)
+	return nil
 }
 
 // executeMemory 执行记忆写入
@@ -234,24 +281,28 @@ func (c *TurnLifecycleCoordinator) executeMemory(
 	ticket FinalizationTicket,
 	idempotencyKey string,
 	result *agentcontext.FinalizeResult,
-) {
+) error {
 	if c.writers.Memory == nil {
 		result.Memory = agentcontext.WritebackStatusSkipped
-		return
+		return nil
 	}
 
 	r, err := c.writers.Memory.EvaluateAndStore(ctx, MemoryWriteRequest{
 		FinalizeKey:    req.FinalizeKey,
 		Ticket:         ticket,
+		UserID:         req.Turn.Session.Handle.UserID,
+		SourceContent:  userInputContent(req.Turn.Session.Handle.Input),
+		OutputContent:  conversationOutputContent(req.Outcome.PrimaryOutput),
 		IdempotencyKey: idempotencyKey,
 		ProfileID:      req.Turn.Profile.Key.Name,
 	})
 	if err != nil {
 		logger.Warn("[Coordinator] Memory 写入失败", zap.Error(err))
 		result.Memory = agentcontext.WritebackStatusFailed
-		return
+		return err
 	}
 	result.Memory = agentcontext.WritebackStatus(r.Status)
+	return nil
 }
 
 // executeManifest 执行清单写入
@@ -261,23 +312,65 @@ func (c *TurnLifecycleCoordinator) executeManifest(
 	ticket FinalizationTicket,
 	idempotencyKey string,
 	result *agentcontext.FinalizeResult,
-) {
+) error {
 	if c.writers.Manifest == nil {
 		result.Manifest = agentcontext.WritebackStatusSkipped
-		return
+		return nil
 	}
 
-	err := c.writers.Manifest.StoreManifest(ctx, ManifestWriteRequest{
-		FinalizeKey:    req.FinalizeKey,
-		Ticket:         ticket,
-		Manifest:       req.Turn.BaseManifest,
-		TurnStatus:     string(req.Outcome.Status),
-		IdempotencyKey: idempotencyKey,
-	})
-	if err != nil {
-		logger.Warn("[Coordinator] Manifest 写入失败", zap.Error(err))
-		result.Manifest = agentcontext.WritebackStatusFailed
-		return
+	records := req.CompileRecords
+	if len(records) == 0 {
+		records = []agentcontext.CompileRecord{{
+			ModelCallID: "base",
+			Manifest:    req.Turn.BaseManifest,
+		}}
+	}
+	for index, record := range records {
+		manifest := record.Manifest
+		manifest.TurnStatus = string(req.Outcome.Status)
+		recordKey := fmt.Sprintf("%s-%d", idempotencyKey, index)
+		err := c.writers.Manifest.StoreManifest(ctx, ManifestWriteRequest{
+			FinalizeKey:    req.FinalizeKey,
+			Ticket:         ticket,
+			Manifest:       manifest,
+			ModelCallID:    record.ModelCallID,
+			TurnStatus:     string(req.Outcome.Status),
+			IdempotencyKey: recordKey,
+		})
+		if err != nil {
+			logger.Warn("[Coordinator] Manifest 写入失败", zap.Error(err))
+			result.Manifest = agentcontext.WritebackStatusFailed
+			return err
+		}
 	}
 	result.Manifest = agentcontext.WritebackStatusSuccess
+	return nil
+}
+
+func hasFailedDependency(node WritebackNode, failed map[WritebackOperation]bool) bool {
+	for _, dependency := range node.DependsOn {
+		if failed[dependency] {
+			return true
+		}
+	}
+	return false
+}
+
+func userInputContent(input agentcontext.TurnInput) string {
+	switch value := input.(type) {
+	case agentcontext.UserMessageInput:
+		return value.Content
+	case agentcontext.SearchTaskInput:
+		return value.Task.Query
+	default:
+		return ""
+	}
+}
+
+func conversationOutputContent(output agentcontext.PrimaryOutput) string {
+	conversation, ok := output.(agentcontext.ConversationOutput)
+	if !ok || conversation.FinalMessage == nil {
+		return ""
+	}
+	return conversation.FinalMessage.Content
 }

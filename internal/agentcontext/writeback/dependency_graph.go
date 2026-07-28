@@ -20,6 +20,17 @@ type WritebackNode struct {
 	MaxRetries int                  // 最大重试次数
 }
 
+// NewManifestOnlyGraph 创建只记录终态 Manifest 的依赖图。
+// Shadow 或 Legacy 写回所有者使用该图，避免重复提交主结果。
+func NewManifestOnlyGraph() *WritebackGraph {
+	return &WritebackGraph{
+		nodes: []WritebackNode{{
+			Operation: WritebackOperationManifest,
+			Required:  true,
+		}},
+	}
+}
+
 // NewWritebackGraph 创建写回依赖图。
 // 根据 Profile 的 WritebackPolicy 和终态决定图结构。
 func NewWritebackGraph(
@@ -64,7 +75,7 @@ func (g *WritebackGraph) buildConversationTurnGraph(status agentcontext.TurnStat
 		g.nodes = append(g.nodes, WritebackNode{
 			Operation:  WritebackOperationManifest,
 			DependsOn:  []WritebackOperation{WritebackOperationAssistant},
-			Required:   false,
+			Required:   true,
 			MaxRetries: 1,
 		})
 
@@ -73,7 +84,7 @@ func (g *WritebackGraph) buildConversationTurnGraph(status agentcontext.TurnStat
 		g.nodes = append(g.nodes, WritebackNode{
 			Operation:  WritebackOperationManifest,
 			DependsOn:  nil,
-			Required:   false,
+			Required:   true,
 			MaxRetries: 1,
 		})
 	}
@@ -93,7 +104,7 @@ func (g *WritebackGraph) buildStepResultGraph(status agentcontext.TurnStatus) {
 		g.nodes = append(g.nodes, WritebackNode{
 			Operation:  WritebackOperationManifest,
 			DependsOn:  []WritebackOperation{WritebackOperationStepResult},
-			Required:   false,
+			Required:   true,
 			MaxRetries: 1,
 		})
 
@@ -102,7 +113,7 @@ func (g *WritebackGraph) buildStepResultGraph(status agentcontext.TurnStatus) {
 		g.nodes = append(g.nodes, WritebackNode{
 			Operation:  WritebackOperationManifest,
 			DependsOn:  nil,
-			Required:   false,
+			Required:   true,
 			MaxRetries: 1,
 		})
 	}

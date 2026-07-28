@@ -95,6 +95,8 @@ type MessagePlan struct {
 	Memories     []ContextItem
 	History      []*schema.Message
 	CurrentInput TurnInput
+	// RuntimeMessages 保存当前输入之后由 Eino 产生的显式 ToolCall/ToolResult。
+	RuntimeMessages []*schema.Message
 }
 
 // CompileRequest 编译请求
@@ -193,6 +195,8 @@ type PrimaryOutput interface {
 // ConversationOutput 会话输出
 type ConversationOutput struct {
 	FinalMessage *schema.Message
+	// Metadata 保存可持久化的结构化元数据（例如引用 JSON），不包含隐藏推理。
+	Metadata []byte
 }
 
 func (ConversationOutput) isPrimaryOutput() {}
