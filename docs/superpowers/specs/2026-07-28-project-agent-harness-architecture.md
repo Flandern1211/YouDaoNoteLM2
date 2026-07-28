@@ -261,6 +261,8 @@ stateDiagram-v2
     queued --> running: claim + create attempt
     running --> finalizing: execution ended
     finalizing --> succeeded: writeback committed
+    finalizing --> failed: failed outcome writeback committed
+    finalizing --> cancelled: cancelled outcome writeback committed
     running --> pause_requested: pause command
     pause_requested --> pausing: worker observed
     pausing --> paused: checkpoint verified
@@ -271,10 +273,11 @@ stateDiagram-v2
     running --> cancel_requested: cancel command
     paused --> cancel_requested: cancel command
     cancel_requested --> cancelled: cleanup committed
-    running --> failed: permanent failure
     pausing --> suspended: checkpoint unavailable
     running --> suspended: unsafe recovery
 ```
+
+`finalizing → cancelled` 表示执行阶段已经产出了取消 Outcome，Finalizer 完成最小 Manifest、终态审计和清理后的终态提交；它不是在 Finalization 中重新中断模型。若用户在 Outcome 已冻结后的 `finalizing` 阶段才提交 Cancel，系统只审计该晚到意图，不得改写 Outcome 或撤销已经提交的成功结果。
 
 **选择理由**
 
@@ -429,7 +432,7 @@ Checkpoint 上线后，推荐把现有“停止生成”按钮升级为 Pause，
 
 **选择**
 
-- 建立统一 `ErrorClass`：`transient`、`rate_limited`、`timeout`、`resource_exhausted`、`invalid_input`、`permission`、`dependency_permanent`、`worker_lost`、`checkpoint_incompatible`、`side_effect_unknown`、`cancelled`。
+- 建立统一 `ErrorClass`：`permanent`、`transient`、`rate_limited`、`timeout`、`resource_exhausted`、`invalid_input`、`permission`、`dependency_permanent`、`worker_lost`、`checkpoint_incompatible`、`side_effect_unknown`、`cancelled`。其中 `permanent` 表示项目内部不可恢复错误，`dependency_permanent` 表示已确认不可通过重试解决的外部依赖错误。
 - 三层重试，但共享一个 Run Budget：
   1. **Model retry**：交给 Eino `ModelRetryConfig`，只处理单次模型调用。
   2. **Step retry**：由 Step Gateway 处理 Search 或已证明幂等的工具。
@@ -716,7 +719,7 @@ Checkpoint 上线后，推荐把现有“停止生成”按钮升级为 Pause，
 3. Eino 把 checkpoint 写入 CheckPointStore。
 4. Harness 验证 checksum、Authority 和 VersionSnapshot。
 5. 只有验证成功才写 `paused`；失败写 `suspended`。
-6. Resume 接受后校验兼容性，创建新 Attempt 并调用 `Runner.Resume`。
+6. Resume 接受后校验兼容性，将 Run 置回 `queued` 并保存待恢复 checkpoint 引用；Dispatcher 的后续 Claim 创建新 Attempt，再调用 `Runner.Resume`。
 
 ### 10.3 Worker 硬崩溃
 

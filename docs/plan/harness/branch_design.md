@@ -15,20 +15,20 @@ main / develop
 
 后续所有 harness 实现分支都从 `harness` 切出，完成验收后先合并回 `harness`。等 `harness` 达到稳定闭环后，再整体合回主线。
 
-| 顺序 | 分支名 | 作用 | 合并后应该具备的能力 |
-| --- | --- | --- | --- |
-| 0 | `feature/context-management` | 当前设计分支，承载上下文管理设计与项目级 harness 架构文档 | 明确整体架构、模块边界、实施阶段；作为创建 `harness` 的设计依据 |
-| H | `harness` | Harness 长期集成主线 | 汇总所有 harness 子分支，形成可持续验证的工程主线 |
-| 1 | `feature/harness-kernel-runstore` | Harness 地基 | 定义 `Run / Attempt / Step / Authority / Revision`，落 MySQL Run 状态机和最小持久化事实源 |
-| 2 | `feature/harness-admission-api` | 请求接入和兼容现有 API | 用户消息持久化、Run 接受、幂等、防重复提交、兼容现有 Chat API |
-| 3 | `feature/harness-supervisor-eino` | 执行闭环 | 创建 Attempt，Supervisor 调 Eino Runner，接 ContextCompiler，记录关键 Step 和基础错误分类 |
-| 4 | `feature/harness-finalization` | 最终写回可靠化 | assistant message 幂等写回、manifest 持久化、Run 终态 revision、finalizing 状态、repair scanner 最小版 |
-| 5 | `feature/harness-events-sse` | 事件日志和 SSE 重放 | semantic event log、事件序号、SSE 断线后按 `after_seq` replay，SSE 断线只 detach |
-| 6 | `feature/harness-interrupt-cancel` | 持久化取消机制 | cancel command 入库，worker 响应取消，Run 进入 `cancelled`，逐步替代进程内 `sync.Map` cancel |
-| 7 | `feature/harness-checkpoint-resume` | Checkpoint 和恢复 | Eino CheckPointStore adapter、checkpoint 元数据、`Runner.Resume / ResumeWithParams`、新 Attempt 从 checkpoint 继续 |
-| 8 | `feature/harness-worker-dispatcher` | 后台 worker 化 | API 创建 Run，MySQL dispatcher 派发，worker 领取并执行 Run，Run 生命周期脱离 HTTP 请求 |
-| 9 | `feature/harness-lease-fencing` | 多实例安全 | lease、fencing token、旧 worker 迟到写入拒绝，多 worker 接管时不乱写 |
-| 10 | `feature/harness-resource-observability-tests` | 工程质量补强 | 并发/费用/token 预算、核心 metrics/log/audit、契约测试、故障注入测试夹具 |
+| 顺序 | 分支名 | 实施前置 | 作用 | 合并后应该具备的能力 |
+| --- | --- | --- | --- | --- |
+| 0 | `feature/context-management` | 无 | 当前设计分支，承载上下文管理设计与项目级 harness 架构文档 | 明确整体架构、模块边界、实施阶段；作为创建 `harness` 的设计依据 |
+| H | `harness` | 架构批准 | Harness 长期集成主线 | 汇总所有 harness 子分支，形成可持续验证的工程主线 |
+| 1 | `feature/harness-kernel-runstore` | 架构批准 | Harness 地基 | 定义 `Run / Attempt / Step / Authority / Revision`，落 MySQL Run 状态机和最小持久化事实源 |
+| 2 | `feature/harness-admission-api` | H1 | 请求接入和兼容现有 API | 用户消息持久化、Run 接受、幂等、防重复提交、兼容现有 Chat API |
+| 3 | `feature/harness-supervisor-eino` | H1、H2 | 执行闭环 | 创建 Attempt，Supervisor 调 Eino Runner，接 ContextCompiler，记录关键 Step 和基础错误分类 |
+| 4 | `feature/harness-finalization` | H1–H3 | 最终写回可靠化 | assistant message 幂等写回、manifest 持久化、Run 终态 revision、finalizing 状态、repair scanner 最小版 |
+| 5 | `feature/harness-events-sse` | H1–H4 | 事件日志和 SSE 重放 | semantic event log、事件序号、SSE 断线后按 `after_seq` replay，SSE 断线只 detach |
+| 6 | `feature/harness-interrupt-cancel` | H1–H4 | 持久化取消机制 | cancel command 入库，worker 响应取消，Run 进入 `cancelled`，逐步替代进程内 `sync.Map` cancel |
+| 7 | `feature/harness-checkpoint-resume` | H1、H3、H6 | Checkpoint 和恢复 | Eino CheckPointStore adapter、checkpoint 元数据、`Runner.Resume / ResumeWithParams`；Resume 排队后由 Claim 创建新 Attempt 并从 checkpoint 继续 |
+| 8 | `feature/harness-worker-dispatcher` | H1–H6 | 后台 worker 化 | API 创建 Run，MySQL dispatcher 派发，worker 领取并执行 Run，claim 前检查 Cancel，Run 生命周期脱离 HTTP 请求 |
+| 9 | `feature/harness-lease-fencing` | H7、H8 | 多实例安全 | lease、fencing token、旧 worker 迟到写入拒绝，多 worker 接管时不乱写 |
+| 10 | `feature/harness-resource-observability-tests` | H1–H9 | 工程质量补强 | 并发/费用/token 预算、核心 metrics/log/audit、契约测试、故障注入测试夹具 |
 
 除 `feature/context-management` 外，表中的 `feature/harness-*` 分支都应从 `harness` 切出，并在完成后合并回 `harness`。
 
