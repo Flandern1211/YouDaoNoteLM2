@@ -273,3 +273,102 @@ type Store interface {
 开始 `feature/harness-kernel-runstore` 编码前，需要明确批准项目级架构第 15 节的十项决策，尤其是：MySQL 为事实源、同一 conversation 的单活动顶层 Run、Checkpoint 前 Stop 为 cancel，以及最终只保留 `agent_runs` 这一权威状态源。
 
 批准后，本文件中的表结构、枚举、包依赖方向和迁移顺序即为该分支的验收基线；任何改变 checkpoint 或副作用语义的扩展，应先补充 ADR 与兼容性评估。
+
+## 11. 实施记录
+
+### 2026-07-28 实施状态
+
+**已完成的工作：**
+
+1. **core 包实现** (`internal/agentharness/core/`)：
+   - `types.go`：定义了 RunID、AttemptID、StepID、StateVersion、FencingToken、Revision 等类型
+   - `statemachine.go`：实现了状态转换表和验证逻辑
+   - `ports.go`：定义了 RunStore 接口
+   - `errors.go`：定义了标准错误类型
+   - `types_test.go`：类型测试
+   - `statemachine_test.go`：状态机测试
+
+2. **run 包实现** (`internal/agentharness/run/`)：
+   - `service.go`：定义了 Service 结构和高级操作
+   - `service_test.go`：Service 测试
+
+3. **store 包实现** (`internal/agentharness/store/`)：
+   - `models.go`：定义了 GORM 模型（AgentRun、AgentRunAttempt、AgentRunStep）
+   - `gorm_store.go`：实现了 GormStore，支持 CreateQueued、Get、Claim、Transition、CreateStep、FinishStep
+   - `gorm_store_test.go`：使用内存 mock 的测试
+
+**实际偏差：**
+
+1. **ID 生成**：当前使用简单的时间戳+随机数生成 ID，而非 UUIDv7。需要在生产环境使用真正的 UUIDv7 生成器。
+
+2. **MySQL 集成测试**：测试使用 MySQL 进行集成测试，需要设置环境变量 `TEST_MYSQL_DSN`。测试包括：
+   - 基本 CRUD 操作
+   - 并发 Claim 测试（验证只有一个赢家）
+   - 旧 Token 拒绝写入测试
+   - Attempt 序号唯一性测试
+
+3. **表结构**：已创建 GORM 模型和 SQL 迁移脚本 `001_create_agent_tables.sql`。
+
+**验证结果：**
+
+- `go test ./internal/agentharness/...`：所有测试通过
+- `go vet ./internal/agentharness/...`：无警告
+- `go build ./internal/agentharness/...`：编译成功
+- `go build ./...`：整个项目编译成功
+
+**依赖方向检查：**
+
+- `core` 包：仅依赖 Go 标准库，无外部依赖 ✓
+- `run` 包：仅依赖 `core` 包，无外部依赖 ✓
+- `store` 包：依赖 `core` 包和 GORM，无其他外部依赖 ✓
+
+**待完成工作：**
+
+1. 使用真正的 UUIDv7 生成器替换简单 ID 生成
+2. 补充更多边界条件测试
+
+**运行 MySQL 集成测试：**
+
+```bash
+# 设置测试数据库 DSN
+export TEST_MYSQL_DSN="user:password@tcp(host:port)/test_database?charset=utf8mb4&parseTime=True&loc=Local"
+
+# 运行测试
+go test ./internal/agentharness/store/... -v
+```
+
+如果使用 Docker Compose，可以这样获取测试数据库：
+
+```bash
+# 启动 MySQL 容器
+docker-compose up -d mysql
+
+# 获取容器 IP
+MYSQL_IP=$(docker inspect -f '{{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' youdaonotelm-mysql)
+
+# 设置 DSN
+export TEST_MYSQL_DSN="root:your_mysql_root_password@tcp(${MYSQL_IP}:3306)/youdao?charset=utf8mb4&parseTime=True&loc=Local"
+```
+
+**已创建的文件：**
+
+```
+internal/agentharness/
+├── core/
+│   ├── types.go          # 核心类型定义
+│   ├── statemachine.go   # 状态机实现
+│   ├── ports.go          # 端口接口定义
+│   ├── errors.go         # 错误类型定义
+│   ├── types_test.go     # 类型测试
+│   └── statemachine_test.go # 状态机测试
+├── run/
+│   ├── service.go        # Service 实现
+│   └── service_test.go   # Service 测试
+└── store/
+    ├── models.go         # GORM 模型定义
+    ├── gorm_store.go     # GormStore 实现
+    ├── gorm_store_test.go # GormStore 测试
+    └── migrations/
+        ├── 001_create_agent_tables.sql # 数据库迁移脚本
+        └── README.md     # 迁移说明文档
+```

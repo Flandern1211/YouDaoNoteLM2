@@ -1,0 +1,92 @@
+-- Agent Harness 表迁移脚本
+-- 创建 agent_runs、agent_run_attempts、agent_run_steps 表
+
+-- 1. agent_runs 表
+CREATE TABLE IF NOT EXISTS `agent_runs` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `parent_run_id` VARCHAR(36) NULL,
+    `agent_type` VARCHAR(64) NOT NULL,
+    `user_id` BIGINT UNSIGNED NOT NULL,
+    `notebook_id` BIGINT UNSIGNED NULL,
+    `conversation_id` BIGINT UNSIGNED NULL,
+    `input_kind` VARCHAR(32) NOT NULL,
+    `input_ref` VARCHAR(256) NOT NULL,
+    `input_hash` CHAR(64) NOT NULL,
+    `version_snapshot_json` JSON NOT NULL,
+    `state` VARCHAR(32) NOT NULL,
+    `desired_state` VARCHAR(32) NOT NULL,
+    `state_version` BIGINT UNSIGNED NOT NULL,
+    `revision` BIGINT UNSIGNED NOT NULL,
+    `current_attempt_id` VARCHAR(36) NULL,
+    `fencing_token` BIGINT UNSIGNED NOT NULL,
+    `pending_resume_checkpoint_ref` VARCHAR(256) NULL,
+    `retry_count` INT NULL,
+    `max_retries` INT NULL,
+    `next_retry_at` DATETIME NULL,
+    `last_error_class` VARCHAR(32) NULL,
+    `last_error_code` VARCHAR(64) NULL,
+    `created_at` DATETIME NOT NULL,
+    `started_at` DATETIME NULL,
+    `finished_at` DATETIME NULL,
+    `updated_at` DATETIME NOT NULL,
+    INDEX `idx_agent_runs_parent_run_id` (`parent_run_id`),
+    INDEX `idx_agent_runs_agent_type` (`agent_type`),
+    INDEX `idx_agent_runs_user_id` (`user_id`),
+    INDEX `idx_agent_runs_notebook_id` (`notebook_id`),
+    INDEX `idx_agent_runs_conversation_id` (`conversation_id`),
+    INDEX `idx_agent_runs_state` (`state`),
+    INDEX `idx_agent_runs_desired_state` (`desired_state`),
+    INDEX `idx_agent_runs_current_attempt_id` (`current_attempt_id`),
+    INDEX `idx_agent_runs_next_retry_at` (`next_retry_at`),
+    CONSTRAINT `fk_agent_runs_parent_run_id` FOREIGN KEY (`parent_run_id`) REFERENCES `agent_runs` (`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 2. agent_run_attempts 表
+CREATE TABLE IF NOT EXISTS `agent_run_attempts` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `run_id` VARCHAR(36) NOT NULL,
+    `attempt_number` INT UNSIGNED NOT NULL,
+    `worker_id` VARCHAR(128) NULL,
+    `fencing_token` BIGINT UNSIGNED NOT NULL,
+    `resume_checkpoint_ref` VARCHAR(256) NULL,
+    `trace_id` VARCHAR(128) NULL,
+    `state` VARCHAR(32) NULL,
+    `error_class` VARCHAR(32) NULL,
+    `error_code` VARCHAR(64) NULL,
+    `started_at` DATETIME NOT NULL,
+    `heartbeat_at` DATETIME NULL,
+    `finished_at` DATETIME NULL,
+    INDEX `idx_agent_run_attempts_run_id` (`run_id`),
+    INDEX `idx_agent_run_attempts_trace_id` (`trace_id`),
+    UNIQUE INDEX `idx_agent_run_attempts_run_id_attempt_number` (`run_id`, `attempt_number`),
+    CONSTRAINT `fk_agent_run_attempts_run_id` FOREIGN KEY (`run_id`) REFERENCES `agent_runs` (`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 3. agent_run_steps 表
+CREATE TABLE IF NOT EXISTS `agent_run_steps` (
+    `id` VARCHAR(36) PRIMARY KEY,
+    `run_id` VARCHAR(36) NOT NULL,
+    `attempt_id` VARCHAR(36) NOT NULL,
+    `parent_step_id` VARCHAR(36) NULL,
+    `kind` VARCHAR(32) NOT NULL,
+    `agent_name` VARCHAR(128) NOT NULL,
+    `state` VARCHAR(32) NOT NULL,
+    `input_hash` CHAR(64) NULL,
+    `tool_call_id` VARCHAR(128) NULL,
+    `result_artifact_ref` VARCHAR(256) NULL,
+    `fencing_token` BIGINT UNSIGNED NOT NULL,
+    `error_class` VARCHAR(32) NULL,
+    `error_code` VARCHAR(64) NULL,
+    `started_at` DATETIME NOT NULL,
+    `finished_at` DATETIME NULL,
+    INDEX `idx_agent_run_steps_run_id` (`run_id`),
+    INDEX `idx_agent_run_steps_attempt_id` (`attempt_id`),
+    INDEX `idx_agent_run_steps_parent_step_id` (`parent_step_id`),
+    INDEX `idx_agent_run_steps_kind` (`kind`),
+    INDEX `idx_agent_run_steps_agent_name` (`agent_name`),
+    INDEX `idx_agent_run_steps_state` (`state`),
+    INDEX `idx_agent_run_steps_tool_call_id` (`tool_call_id`),
+    CONSTRAINT `fk_agent_run_steps_run_id` FOREIGN KEY (`run_id`) REFERENCES `agent_runs` (`id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_agent_run_steps_attempt_id` FOREIGN KEY (`attempt_id`) REFERENCES `agent_run_attempts` (`id`) ON DELETE RESTRICT,
+    CONSTRAINT `fk_agent_run_steps_parent_step_id` FOREIGN KEY (`parent_step_id`) REFERENCES `agent_run_steps` (`id`) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
