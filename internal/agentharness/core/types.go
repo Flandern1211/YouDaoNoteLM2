@@ -232,3 +232,46 @@ func IsTerminalStepState(state StepState) bool {
 		state == StepStateFailed ||
 		state == StepStateCancelled
 }
+
+// --- Admission 类型 ---
+
+// EventType 语义事件类型。
+type EventType string
+
+const (
+	// EventRunAccepted Run 被接纳。
+	EventRunAccepted EventType = "run.accepted"
+)
+
+// RunEvent 语义事件信封。
+type RunEvent struct {
+	RunID          RunID
+	Sequence       uint64
+	EventID        string
+	AttemptID      *AttemptID
+	StepID         *StepID
+	EventType      EventType
+	PayloadVersion uint
+	PayloadJSON    string
+}
+
+// AcceptRequest Admission 请求。
+type AcceptRequest struct {
+	UserID          uint
+	ConversationID  *uint
+	NotebookID      *uint
+	AgentType       string
+	Input           InputRef
+	SourceIDs       []uint
+	IdempotencyKey  string
+	VersionSnapshot VersionSnapshot
+}
+
+// AcceptedRun Admission 结果。
+type AcceptedRun struct {
+	RunID          RunID
+	MessageID      string
+	State          RunState
+	Sequence       uint64
+	IsIdempotentReplay bool
+}

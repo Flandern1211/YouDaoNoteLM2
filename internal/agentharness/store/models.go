@@ -14,6 +14,8 @@ type AgentRun struct {
 	UserID                  uint            `gorm:"not null;index"`
 	NotebookID              *uint           `gorm:"index"`
 	ConversationID          *uint           `gorm:"index"`
+	IdempotencyKey          string          `gorm:"type:varchar(191);not null;uniqueIndex:idx_user_idempotency,priority:1"`
+	Sequence                uint64          `gorm:"not null;unsigned;uniqueIndex:idx_conv_sequence,priority:1"`
 	InputKind               string          `gorm:"type:varchar(32);not null"`
 	InputRef                string          `gorm:"type:varchar(256);not null"`
 	InputHash               string          `gorm:"type:char(64);not null"`
@@ -77,3 +79,19 @@ type AgentRunStep struct {
 }
 
 func (AgentRunStep) TableName() string { return "agent_run_steps" }
+
+// AgentRunEvent 是 agent_run_events 表的 GORM 模型。
+type AgentRunEvent struct {
+	ID              string    `gorm:"primaryKey;type:varchar(36)"`
+	RunID           string    `gorm:"type:varchar(36);not null;index:idx_run_sequence,unique"`
+	Sequence        uint64    `gorm:"not null;unsigned;index:idx_run_sequence,unique"`
+	EventID         string    `gorm:"type:varchar(36);not null;uniqueIndex"`
+	AttemptID       *string   `gorm:"type:varchar(36);index"`
+	StepID          *string   `gorm:"type:varchar(36);index"`
+	EventType       string    `gorm:"type:varchar(64);not null"`
+	PayloadVersion  uint      `gorm:"not null;unsigned"`
+	PayloadJSON     string    `gorm:"type:json;not null"`
+	CreatedAt       time.Time `gorm:"not null"`
+}
+
+func (AgentRunEvent) TableName() string { return "agent_run_events" }

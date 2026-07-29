@@ -5,8 +5,11 @@ import (
 	"YoudaoNoteLm/internal/agentcontext"
 	agentcontextAdapter "YoudaoNoteLm/internal/agentcontext/adapter"
 	agentcontextHarness "YoudaoNoteLm/internal/agentcontext/harness"
+	agentharnessStore "YoudaoNoteLm/internal/agentharness/store"
+	agentharnessRun "YoudaoNoteLm/internal/agentharness/run"
 	"YoudaoNoteLm/internal/agentcontext/writeback"
 	"YoudaoNoteLm/internal/api"
+	chatAdapter "YoudaoNoteLm/internal/api/v1/chat"
 	"YoudaoNoteLm/internal/model/entity"
 	"YoudaoNoteLm/internal/rag"
 	"YoudaoNoteLm/internal/repository"
@@ -321,6 +324,19 @@ func (a *App) initDependencies() error {
 		return err
 	}
 
+	// 初始化 Admission API（feature flag 控制）
+	admissionEnabled := a.cfg.Agent.Harness.AdmissionEnabled
+	var admissionAdapter *chatAdapter.AdmissionAdapter
+	if admissionEnabled {
+		admissionStore := agentharnessStore.NewGormStore(a.mysqlDB)
+		admissionSvc := agentharnessRun.NewAdmissionService(admissionStore)
+		admissionAdapter = chatAdapter.NewAdmissionAdapter(admissionSvc, true)
+		logger.Info("Admission API 已启用")
+	} else {
+		admissionAdapter = chatAdapter.NewAdmissionAdapter(nil, false)
+		logger.Info("Admission API 未启用，使用 Legacy Chat 路径")
+	}
+
 	a.router = api.NewRouter(
 		userSvc,
 		authSvc,
@@ -341,6 +357,7 @@ func (a *App) initDependencies() error {
 		ingestionSvc,
 		minioStorage,
 		userRepo,
+		admissionAdapter,
 	)
 	return nil
 }

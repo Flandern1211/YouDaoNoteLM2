@@ -27,7 +27,7 @@ func getTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err, "连接测试数据库失败")
 
 	// 自动迁移表结构
-	err = db.AutoMigrate(&AgentRun{}, &AgentRunAttempt{}, &AgentRunStep{})
+	err = db.AutoMigrate(&AgentRun{}, &AgentRunAttempt{}, &AgentRunStep{}, &AgentRunEvent{}, &messageRecord{})
 	require.NoError(t, err, "自动迁移表结构失败")
 
 	return db
@@ -36,9 +36,11 @@ func getTestDB(t *testing.T) *gorm.DB {
 // cleanupTestDB 清理测试数据
 func cleanupTestDB(t *testing.T, db *gorm.DB) {
 	t.Helper()
+	db.Exec("DELETE FROM agent_run_events")
 	db.Exec("DELETE FROM agent_run_steps")
 	db.Exec("DELETE FROM agent_run_attempts")
 	db.Exec("DELETE FROM agent_runs")
+	db.Exec("DELETE FROM messages")
 }
 
 func TestGormStore_CreateQueued(t *testing.T) {
@@ -517,4 +519,122 @@ func TestGormStore_OldTokenRejected(t *testing.T) {
 	}
 	_, err = store.Transition(context.Background(), transitionReq)
 	assert.ErrorIs(t, err, core.ErrAuthorityStale)
+}
+
+// --- Accept 测试 ---
+
+func TestGormStore_Accept(t *testing.T) {
+	db := getTestDB(t)
+	defer cleanupTestDB(t, db)
+	store := NewGormStore(db)
+
+	convID := uint(100)
+	req := core.AcceptRequest{
+		UserID:         1,
+		ConversationID: &convID,
+		AgentType:      "chat",
+		IdempotencyKey: "test-key-1",
+		Input: core.InputRef{
+			Kind: "chat_message",
+			Ref:  "hello world",
+			Hash: "hash-1",
+		},
+		VersionSnapshot: core.VersionSnapshot{
+			AgentDefinitionVersion: "v1",
+			PromptVersion:          "v1",
+		},
+	}
+
+	result, err := store.Accept(context.Background(), req)
+	require.NoError(t, err)
+
+	// 验证结果
+	assert.NotEmpty(t, result.RunID)
+	assert.NotEmpty(t, result.MessageID)
+	assert.Equal(t, core.RunStateQueued, result.State)
+	assert.Equal(t, uint64(1), result.Sequence)
+	assert.False(t, result.IsIdempotentReplay)
+
+	// 验证 Run 已创建
+	var runRecord AgentRun
+	err = db.First(&runRecord, "id = ?", string(result.RunID)).Error
+	require.NoError(t, err)
+	assert.Equal(t, "test-key-1", runRecord.IdempotencyKey)
+	assert.Equal(t, uint64(1), runRecord.Sequence)
+	assert.Equal(t, core.RunStateQueued, runRecord.State)
+
+	// 验证事件已创建
+	var eventRecord AgentRunEvent
+	err = db.First(&eventRecord, "run_id = ?", string(result.RunID)).Error
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), eventRecord.Sequence)
+	assert.Equal(t, string(core.EventRunAccepted), eventRecord.EventType)
+}
+
+func TestGormStore_Accept_IdempotentReplay(t *testing.T) {
+	db := getTestDB(t)
+	defer cleanupTestDB(t, db)
+	store := NewGormStore(db)
+
+	convID := uint(100)
+	req := core.AcceptRequest{
+		UserID:         1,
+		ConversationID: &convID,
+		AgentType:      "chat",
+		IdempotencyKey: "test-key-2",
+		Input: core.InputRef{
+			Kind: "chat_message",
+			Ref:  "hello world",
+			Hash: "hash-1",
+		},
+		VersionSnapshot: core.VersionSnapshot{
+			AgentDefinitionVersion: "v1",
+			PromptVersion:          "v1",
+		},
+	}
+
+	// 第一次请求
+	result1, err := store.Accept(context.Background(), req)
+	require.NoError(t, err)
+	assert.False(t, result1.IsIdempotentReplay)
+
+	// 第二次请求（相同幂等键）
+	result2, err := store.Accept(context.Background(), req)
+	require.NoError(t, err)
+	assert.True(t, result2.IsIdempotentReplay)
+	assert.Equal(t, result1.RunID, result2.RunID)
+}
+
+func TestGormStore_Accept_SequenceIncrement(t *testing.T) {
+	db := getTestDB(t)
+	defer cleanupTestDB(t, db)
+	store := NewGormStore(db)
+
+	convID := uint(200)
+
+	// 第一个 Run
+	req1 := core.AcceptRequest{
+		UserID:         1,
+		ConversationID: &convID,
+		AgentType:      "chat",
+		IdempotencyKey: "key-seq-1",
+		Input:          core.InputRef{Kind: "chat_message", Ref: "msg1", Hash: "h1"},
+		VersionSnapshot: core.VersionSnapshot{AgentDefinitionVersion: "v1"},
+	}
+	result1, err := store.Accept(context.Background(), req1)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), result1.Sequence)
+
+	// 第二个 Run
+	req2 := core.AcceptRequest{
+		UserID:         1,
+		ConversationID: &convID,
+		AgentType:      "chat",
+		IdempotencyKey: "key-seq-2",
+		Input:          core.InputRef{Kind: "chat_message", Ref: "msg2", Hash: "h2"},
+		VersionSnapshot: core.VersionSnapshot{AgentDefinitionVersion: "v1"},
+	}
+	result2, err := store.Accept(context.Background(), req2)
+	require.NoError(t, err)
+	assert.Equal(t, uint64(2), result2.Sequence)
 }

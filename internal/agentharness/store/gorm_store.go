@@ -453,3 +453,150 @@ func generateID() string {
 	// TODO: 使用真正的 UUIDv7 生成器
 	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().UnixNano()%1000000)
 }
+
+// --- AdmissionStore 实现 ---
+
+// messageRecord 是 messages 表的 GORM 模型（仅用于 Accept 事务内创建）。
+type messageRecord struct {
+	ID             uint   `gorm:"primaryKey;autoIncrement"`
+	ConversationID uint   `gorm:"not null;index"`
+	Role           string `gorm:"type:varchar(32);not null"`
+	Content        string `gorm:"type:text;not null"`
+	Metadata       string `gorm:"type:json"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+func (messageRecord) TableName() string { return "messages" }
+
+// Accept 在一个事务中完成：创建入口 Message、queued Run 和首条 run.accepted 事件。
+func (s *GormStore) Accept(ctx context.Context, req core.AcceptRequest) (core.AcceptedRun, error) {
+	var result core.AcceptedRun
+
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 1. 幂等查询：按 (user_id, idempotency_key) 查找既有 Run
+		var existing AgentRun
+		err := tx.Where("user_id = ? AND idempotency_key = ?", req.UserID, req.IdempotencyKey).
+			First(&existing).Error
+		if err == nil {
+			// 幂等命中：验证请求不可变字段一致
+			if existing.AgentType != req.AgentType ||
+				existing.InputKind != req.Input.Kind ||
+				existing.InputRef != req.Input.Ref {
+				return core.ErrIdempotencyKeyConflict
+			}
+			// 返回既有结果
+			result = core.AcceptedRun{
+				RunID:              core.RunID(existing.ID),
+				State:              existing.State,
+				Sequence:           existing.Sequence,
+				IsIdempotentReplay: true,
+			}
+			return nil
+		}
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		// 2. 计算 conversation 内序号（使用 SELECT MAX(sequence) + 1）
+		var nextSequence uint64 = 1
+		if req.ConversationID != nil {
+			var maxSeq struct {
+				MaxSeq *uint64
+			}
+			tx.Model(&AgentRun{}).
+				Where("conversation_id = ?", *req.ConversationID).
+				Select("MAX(sequence) as max_seq").
+				Scan(&maxSeq)
+			if maxSeq.MaxSeq != nil {
+				nextSequence = *maxSeq.MaxSeq + 1
+			}
+		}
+
+		// 3. 创建入口 Message
+		msgID := generateID()
+		msg := messageRecord{
+			ID:             0, // auto increment
+			ConversationID: derefUint(req.ConversationID),
+			Role:           "user",
+			Content:        req.Input.Ref, // InputRef.Ref 指向消息内容标识
+			Metadata:       "{}",
+			CreatedAt:      time.Now(),
+			UpdatedAt:      time.Now(),
+		}
+		if err := tx.Create(&msg).Error; err != nil {
+			return fmt.Errorf("创建入口消息失败: %w", err)
+		}
+		// 获取自增 ID
+		msgID = fmt.Sprintf("%d", msg.ID)
+
+		// 4. 冻结 VersionSnapshot 并创建 queued Run
+		snapshotJSON, err := json.Marshal(req.VersionSnapshot)
+		if err != nil {
+			return fmt.Errorf("编码 VersionSnapshot 失败: %w", err)
+		}
+
+		runID := generateID()
+		run := AgentRun{
+			ID:                  runID,
+			AgentType:           req.AgentType,
+			UserID:              req.UserID,
+			NotebookID:          req.NotebookID,
+			ConversationID:      req.ConversationID,
+			IdempotencyKey:      req.IdempotencyKey,
+			Sequence:            nextSequence,
+			InputKind:           req.Input.Kind,
+			InputRef:            fmt.Sprintf("chat_message:%s", msgID),
+			InputHash:           req.Input.Hash,
+			VersionSnapshotJSON: string(snapshotJSON),
+			State:               core.RunStateQueued,
+			DesiredState:        core.DesiredStateRunning,
+			StateVersion:        1,
+			Revision:            0,
+			FencingToken:        0,
+			CreatedAt:           time.Now(),
+			UpdatedAt:           time.Now(),
+		}
+		if err := tx.Create(&run).Error; err != nil {
+			if isDuplicateKey(err) {
+				return core.ErrRunAlreadyExists
+			}
+			return fmt.Errorf("创建 Run 失败: %w", err)
+		}
+
+		// 5. 插入首条 run.accepted 事件 (sequence=1)
+		eventID := generateID()
+		event := AgentRunEvent{
+			ID:              generateID(),
+			RunID:           runID,
+			Sequence:        1,
+			EventID:         eventID,
+			EventType:       string(core.EventRunAccepted),
+			PayloadVersion:  1,
+			PayloadJSON:     fmt.Sprintf(`{"run_id":"%s","agent_type":"%s","user_id":%d}`, runID, req.AgentType, req.UserID),
+			CreatedAt:       time.Now(),
+		}
+		if err := tx.Create(&event).Error; err != nil {
+			return fmt.Errorf("创建事件失败: %w", err)
+		}
+
+		result = core.AcceptedRun{
+			RunID:              core.RunID(runID),
+			MessageID:          msgID,
+			State:              core.RunStateQueued,
+			Sequence:           nextSequence,
+			IsIdempotentReplay: false,
+		}
+		return nil
+	})
+
+	return result, err
+}
+
+// derefUint 解引用 *uint，nil 时返回 0。
+func derefUint(p *uint) uint {
+	if p == nil {
+		return 0
+	}
+	return *p
+}

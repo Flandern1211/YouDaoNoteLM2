@@ -35,3 +35,12 @@ type FinishStepRequest struct {
 	ErrorCode       *string
 	ResultArtifactRef *string
 }
+
+// AdmissionStore 扩展 RunStore，支持 Admission 原子接纳。
+type AdmissionStore interface {
+	RunStore
+
+	// Accept 在一个事务中完成：创建入口 Message、queued Run 和首条 run.accepted 事件。
+	// 返回 AcceptedRun 与可能的幂等重放结果。
+	Accept(ctx context.Context, req AcceptRequest) (AcceptedRun, error)
+}

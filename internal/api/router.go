@@ -31,6 +31,7 @@ type Router struct {
 	sourceCtrl     *source.Controller
 	generationCtrl *generation.Controller
 	chatCtrl       *chat.Controller
+	admissionAdapter *chat.AdmissionAdapter
 	tokenBlacklist service.TokenBlacklistService
 	userRepo       repository.UserRepository
 	importCtrl     *importn.Controller
@@ -63,6 +64,7 @@ func NewRouter(
 	ingestionService rag.IngestionService,
 	storage externalStorage.FileStorage,
 	userRepo repository.UserRepository,
+	admissionAdapter *chat.AdmissionAdapter,
 ) *Router {
 	return &Router{
 		userCtrl:       user.NewController(userService, tokenBlacklist),
@@ -71,6 +73,7 @@ func NewRouter(
 		sourceCtrl:     source.NewController(sourceService, tokenBlacklist),
 		generationCtrl: generation.NewController(generationService),
 		chatCtrl:       chat.NewController(chatAgentService, convService),
+		admissionAdapter: admissionAdapter,
 		tokenBlacklist: tokenBlacklist,
 		userRepo:       userRepo,
 		importCtrl:     importn.NewController(importerService),
@@ -116,6 +119,11 @@ func (r *Router) Setup(engine *gin.Engine) {
 		// 导入路由（需认证）
 		r.importCtrl.RegisterRoutes(v1, r.tokenBlacklist, statusCheck)
 		r.chatCtrl.RegisterRoutes(v1, r.tokenBlacklist, statusCheck)
+
+		// Admission 路由（feature flag 控制）
+		if r.admissionAdapter != nil && r.admissionAdapter.IsEnabled() {
+			chat.RegisterAdmissionRoutes(v1, r.admissionAdapter, r.tokenBlacklist, statusCheck)
+		}
 
 		// 用户配置路由（需认证）
 		r.userConfigCtrl.RegisterRoutes(v1, statusCheck)

@@ -128,6 +128,12 @@ type AgentConfig struct {
 	CancelTimeout            time.Duration           `mapstructure:"cancel_timeout"`              // 中断后等待安全点超时，默认 5s
 	MainAgentEnabled         bool                    `mapstructure:"main_agent_enabled"`          // 主从协同开关，默认 false（关闭时行为等价于现有）
 	ContextManagement        ContextManagementConfig `mapstructure:"context_management"`          // 上下文管理配置（W6）
+	Harness                  HarnessConfig           `mapstructure:"harness"`                     // Harness 配置
+}
+
+// HarnessConfig Agent Harness 配置
+type HarnessConfig struct {
+	AdmissionEnabled bool `mapstructure:"admission_enabled"` // Admission API 开关
 }
 
 // ContextManagementConfig 上下文管理配置

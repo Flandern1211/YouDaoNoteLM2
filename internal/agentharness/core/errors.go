@@ -21,4 +21,8 @@ var (
 	ErrInvalidErrorClass = errors.New("invalid error class")
 	// ErrNotQueued Run 不在 queued 状态，无法 claim。
 	ErrNotQueued = errors.New("run not in queued state")
+	// ErrIdempotencyKeyConflict 相同 idempotency_key 但请求参数不一致。
+	ErrIdempotencyKeyConflict = errors.New("idempotency key conflict")
+	// ErrActiveRunExists 同一 conversation 已有活动 Run。
+	ErrActiveRunExists = errors.New("active run exists in conversation")
 )
