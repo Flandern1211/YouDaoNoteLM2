@@ -59,6 +59,17 @@ milvus:
 security:
   encryption_key: ""                      # 由 ENCRYPTION_KEY 环境变量覆盖
 
+# Agent 上下文管理（默认 legacy；启用前先使用 shadow 观察）
+agent:
+  context_management:
+    mode: "legacy"
+    shadow_sample_basis_points: 0
+    rollout_version: ""
+    memory_enabled: false
+    exact_count_enabled: false
+    writeback_enabled: false
+    fingerprint_salt: ""
+
 # 外部服务配置
 external:
   markitdown:

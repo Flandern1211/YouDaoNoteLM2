@@ -2,7 +2,14 @@ package app
 
 import (
 	searchAgent "YoudaoNoteLm/internal/agent/search"
+	"YoudaoNoteLm/internal/agentcontext"
+	agentcontextAdapter "YoudaoNoteLm/internal/agentcontext/adapter"
+	agentcontextHarness "YoudaoNoteLm/internal/agentcontext/harness"
+	agentharnessStore "YoudaoNoteLm/internal/agentharness/store"
+	agentharnessRun "YoudaoNoteLm/internal/agentharness/run"
+	"YoudaoNoteLm/internal/agentcontext/writeback"
 	"YoudaoNoteLm/internal/api"
+	chatAdapter "YoudaoNoteLm/internal/api/v1/chat"
 	"YoudaoNoteLm/internal/model/entity"
 	"YoudaoNoteLm/internal/rag"
 	"YoudaoNoteLm/internal/repository"
@@ -14,9 +21,12 @@ import (
 	"YoudaoNoteLm/pkg/cache"
 	"YoudaoNoteLm/pkg/config"
 	"YoudaoNoteLm/pkg/database"
+	bizerrors "YoudaoNoteLm/pkg/errors"
 	"YoudaoNoteLm/pkg/logger"
 	"YoudaoNoteLm/pkg/utils"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"os"
@@ -71,7 +81,9 @@ func (a *App) Initialize() error {
 		return err
 	}
 
-	a.initDependencies()
+	if err := a.initDependencies(); err != nil {
+		return err
+	}
 	a.initRouter()
 	a.initServer()
 	return nil
@@ -126,7 +138,13 @@ func (a *App) initDatabase() error {
 		&entity.UserLLMConfig{},
 		&entity.YoudaoBinding{},
 		&entity.SysConfig{},
+		&agentcontextHarness.PersistentRun{},
+		&agentcontextHarness.PersistentManifest{},
+		&agentcontextHarness.PersistentWriteback{},
 	); err != nil {
+		if a.cfg.Agent.ContextManagement.GetMode() != "legacy" {
+			return fmt.Errorf("上下文 Harness 数据库迁移失败: %w", err)
+		}
 		logger.Warn("database migration failed", zap.Error(err))
 	}
 
@@ -177,7 +195,7 @@ func (a *App) verifyEncryptionKey() error {
 }
 
 // initDependencies 初始化依赖注入
-func (a *App) initDependencies() {
+func (a *App) initDependencies() error {
 	// 创建 Repository
 	userRepo := repository.NewUserRepository(a.mysqlDB)
 	notebookRepo := repository.NewNotebookRepository(a.mysqlDB)
@@ -251,7 +269,7 @@ func (a *App) initDependencies() {
 			return nil, fmt.Errorf("获取 Embedding 配置失败: %w", err)
 		}
 		if cfg == nil {
-			return nil, fmt.Errorf("请先在设置中配置 Embedding 服务")
+			return nil, bizerrors.ErrEmbeddingNotConfigured
 		}
 		return rag.NewEmbedderFromConfig(ctx, cfg)
 	}
@@ -284,8 +302,8 @@ func (a *App) initDependencies() {
 	youdaoBindingRepo := repository.NewYoudaoBindingRepository(a.mysqlDB)
 	youdaoSvc := service.NewYoudaoService(youdaoCLI, youdaoBindingRepo, sourceRepo, ingestionSvc, a.cfg.External.Youdao.CookiesPath, structurer, configSvc, sourceSummaryCache)
 
-	// 创建搜索 Agent（依赖 youdaoSvc、youdaoCLI 和 importerSvc）
-	searchAgentInst := searchAgent.NewSearchAgent(configSvc, importerSvc, youdaoSvc, youdaoCLI)
+	// 创建搜索 Agent（import_document 是公共工具，search agent 只用 url 来源，不依赖 youdao）
+	searchAgentInst := searchAgent.NewSearchAgent(configSvc, importerSvc)
 	searchAgentSvc := service.NewSearchAgentService(configSvc, importerSvc, searchAgentInst)
 
 	// 创建生成服务（SearchService 暂为 nil，后续可接入）
@@ -300,6 +318,24 @@ func (a *App) initDependencies() {
 	convSvc := service.NewConversationService(conversationRepo, messageRepo, chatCache)
 	logger.Info("ChatAgentService 初始化成功")
 	logger.Info("ConversationService 初始化成功")
+
+	// 构造 Agent 上下文管理依赖与最小 Harness
+	if err := a.initAgentContext(chatAgentSvc, conversationRepo, messageRepo, chatCache); err != nil {
+		return err
+	}
+
+	// 初始化 Admission API（feature flag 控制）
+	admissionEnabled := a.cfg.Agent.Harness.AdmissionEnabled
+	var admissionAdapter *chatAdapter.AdmissionAdapter
+	if admissionEnabled {
+		admissionStore := agentharnessStore.NewGormStore(a.mysqlDB)
+		admissionSvc := agentharnessRun.NewAdmissionService(admissionStore)
+		admissionAdapter = chatAdapter.NewAdmissionAdapter(admissionSvc, true)
+		logger.Info("Admission API 已启用")
+	} else {
+		admissionAdapter = chatAdapter.NewAdmissionAdapter(nil, false)
+		logger.Info("Admission API 未启用，使用 Legacy Chat 路径")
+	}
 
 	a.router = api.NewRouter(
 		userSvc,
@@ -320,7 +356,87 @@ func (a *App) initDependencies() {
 		youdaoSvc,
 		ingestionSvc,
 		minioStorage,
+		userRepo,
+		admissionAdapter,
 	)
+	return nil
+}
+
+// initAgentContext 构造 Agent 上下文管理依赖和最小持久化 Harness。
+// 构造不可变 Registry、Provider、ContextCompiler 和 Eino Middleware，
+// 通过构造参数注入 ChatAgentService，不使用包级 mutable singleton。
+func (a *App) initAgentContext(
+	chatAgentSvc service.ChatAgentService,
+	conversationRepo repository.ConversationRepository,
+	messageRepo repository.MessageRepository,
+	chatCache *cache.ChatCache,
+) error {
+	// 1. 构造不可变 Profile Registry
+	registry, err := agentcontext.NewRegistry(
+		[]agentcontext.ContextProfile{
+			agentcontext.NewChatV1Profile(),
+			agentcontext.NewMainV1Profile(),
+			agentcontext.NewSearchV1Profile(),
+		},
+		agentcontextAdapter.DefaultModelFixture(),
+	)
+	if err != nil {
+		return fmt.Errorf("初始化 Agent 上下文 Registry 失败: %w", err)
+	}
+
+	// 2. 构造 Provider 适配器
+	promptProvider := agentcontextAdapter.NewStaticPromptProvider(nil) // 无资料列表查找
+	historyProvider := agentcontextAdapter.NewLegacyHistoryProvider(
+		agentcontextAdapter.NewChatCacheBridge(chatCache),
+		conversationRepo,
+		messageRepo,
+	)
+	memoryProvider := agentcontextAdapter.NewDisabledMemoryProvider()
+	modelResolver := agentcontextAdapter.NewConservativeModelCapabilitiesResolver(registry)
+
+	// 3. 构造 ContextCompiler 与 HMAC 指纹器
+	fingerprintSalt := a.cfg.Agent.ContextManagement.FingerprintSalt
+	if fingerprintSalt == "" {
+		digest := sha256.Sum256([]byte("agent-context-fingerprint:v1:" + a.cfg.Security.EncryptionKey))
+		fingerprintSalt = hex.EncodeToString(digest[:])
+	}
+	compiler := agentcontext.NewDefaultCompiler(agentcontext.PrepareTurnConfig{
+		Registry:        registry,
+		PromptProvider:  promptProvider,
+		HistoryProvider: historyProvider,
+		MemoryProvider:  memoryProvider,
+		ModelResolver:   modelResolver,
+	}, agentcontext.NewContextFingerprinter(fingerprintSalt), &agentcontext.NoopMetrics{})
+
+	// 4. 构造 MySQL Store；Assistant 与 Manifest 均使用稳定幂等键。
+	store := agentcontextHarness.NewGormStore(a.mysqlDB, chatCache)
+	runtime, err := agentcontextHarness.NewRuntime(agentcontextHarness.RuntimeConfig{
+		ContextConfig: a.cfg.Agent.ContextManagement,
+		Registry:      registry,
+		Compiler:      compiler,
+		Store:         store,
+		Writers: writeback.WriterRegistry{
+			Assistant: store,
+			Manifest:  store,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("初始化 Agent Context Harness 失败: %w", err)
+	}
+
+	// 5. 注入 ChatAgentService。运行模式按每个新 Run 固化，Legacy 默认不改变行为。
+	type contextRuntimeInjector interface {
+		WithContextRuntime(runtime *agentcontextHarness.Runtime)
+	}
+	if injector, ok := chatAgentSvc.(contextRuntimeInjector); ok {
+		injector.WithContextRuntime(runtime)
+	}
+
+	logger.Info("Agent 上下文管理初始化成功",
+		zap.String("mode", a.cfg.Agent.ContextManagement.GetMode()),
+		zap.Bool("writeback_enabled", a.cfg.Agent.ContextManagement.WritebackEnabled),
+	)
+	return nil
 }
 
 // initIngestionService 初始化入库服务
@@ -343,7 +459,7 @@ func (a *App) initIngestionService(sourceRepo repository.SourceRepository, confi
 			return nil, 0, fmt.Errorf("获取 Embedding 配置失败: %w", err)
 		}
 		if cfg == nil {
-			return nil, 0, fmt.Errorf("请先在设置中配置 Embedding 服务")
+			return nil, 0, bizerrors.ErrEmbeddingNotConfigured
 		}
 		embedder, err := rag.NewEmbedderFromConfig(ctx, cfg)
 		if err != nil {

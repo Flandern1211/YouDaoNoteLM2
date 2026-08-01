@@ -13,6 +13,13 @@ var globalConfig *Config
 // Load 加载配置文件
 func Load(configPath string) (*Config, error) {
 	v := viper.New()
+	v.SetDefault("agent.context_management.mode", "legacy")
+	v.SetDefault("agent.context_management.shadow_sample_basis_points", 0)
+	v.SetDefault("agent.context_management.memory_enabled", false)
+	v.SetDefault("agent.context_management.exact_count_enabled", false)
+	v.SetDefault("agent.context_management.writeback_enabled", false)
+	v.SetDefault("agent.context_management.rollout_version", "")
+	v.SetDefault("agent.context_management.fingerprint_salt", "")
 
 	// 设置配置文件路径
 	if configPath != "" {

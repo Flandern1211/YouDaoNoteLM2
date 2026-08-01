@@ -1,5 +1,41 @@
 package prompts
 
+import (
+	"fmt"
+	"strings"
+)
+
+// SourceInfo 资料来源信息，用于统一 Prompt 渲染
+type SourceInfo struct {
+	ID   uint
+	Name string
+}
+
+// RenderSystemPrompt 统一的系统提示词渲染函数。
+// 所有需要生成 Chat Agent 系统提示词的地方都必须通过此函数，
+// 禁止复制模板或在 Provider 内重写提示词。
+func RenderSystemPrompt(sources []SourceInfo) string {
+	sourceList := renderSourceList(sources)
+	return strings.Replace(ChatAgentSystemPrompt, "{{.SourceList}}", sourceList, 1)
+}
+
+// renderSourceList 渲染资料列表
+func renderSourceList(sources []SourceInfo) string {
+	if len(sources) == 0 {
+		return "（用户未选定特定资料）"
+	}
+
+	var sb strings.Builder
+	for i, src := range sources {
+		name := src.Name
+		if name == "" {
+			name = fmt.Sprintf("资料#%d", src.ID)
+		}
+		sb.WriteString(fmt.Sprintf("%d. %s (ID: %d)\n", i+1, name, src.ID))
+	}
+	return sb.String()
+}
+
 // ChatAgentSystemPrompt Agent 模式的系统提示词
 const ChatAgentSystemPrompt = `# 角色
 你是一个智能知识问答助手，基于用户选定的资料来源回答问题。
@@ -44,6 +80,12 @@ const ChatAgentSystemPrompt = `# 角色
 6. 引用标注：回答中涉及资料内容时，在相关句子后添加 [N] 标记（N 为资料编号），让读者知道信息来源。例如："根据资料，机器学习是人工智能的一个分支 [1]，它通过数据驱动的方式进行学习 [2]。"
    **重要：[N] 标注只能用于 search_knowledge 实际检索到的内容。禁止对未检索的内容标注 [N]——否则用户点击序号将无法查看引用原文，严重影响体验。**
 7. 禁止输出思考过程或操作说明。不要说"我来检索一下"、"让我先获取摘要"、"接下来我会查找"、"好的，我来按照流程操作"之类的过渡语句，直接给出最终回答
+
+# 无资料模式
+当用户未选定任何资料时（资料列表显示"用户未选定特定资料"）：
+1. **允许简单对话**：可以进行打招呼、自我介绍等基础交流（如"你好"、"你是谁"、"我是xxx"）
+2. **禁止回答与资料无关的问题**：不要回答天气、新闻、闲聊等与知识库无关的问题
+3. **如需使用工具**：当用户的问题需要检索资料时，请回复："请先选中资料再进行提问"
 
 # 注意
 - 不要一次调用太多工具，优先用最相关的查询

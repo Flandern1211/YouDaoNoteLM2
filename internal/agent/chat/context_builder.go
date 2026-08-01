@@ -17,11 +17,19 @@ import (
 // RecentRoundsLimit 缓存中保留的最近对话轮数
 const RecentRoundsLimit = 10
 
+// chatCacheReader 定义 ContextBuilder 实际使用的缓存方法子集。
+// 生产构造器仍接收 *cache.ChatCache；测试可替换为 fake 实现。
+type chatCacheReader interface {
+	GetRecentMessages(ctx context.Context, conversationID uint) ([]cache.MessagePair, error)
+	GetSummary(ctx context.Context, conversationID uint) (string, bool, error)
+	SetSummary(ctx context.Context, conversationID uint, summary string) error
+}
+
 // ContextBuilder 上下文构建器
 type ContextBuilder struct {
 	conversationRepo repository.ConversationRepository
 	messageRepo      repository.MessageRepository
-	cache            *cache.ChatCache
+	cache            chatCacheReader
 }
 
 // NewContextBuilder 创建上下文构建器

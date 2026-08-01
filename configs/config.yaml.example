@@ -77,6 +77,17 @@ cors:
   allow_credentials: true
   max_age: 86400
 
+# Agent 上下文管理（默认 legacy；启用前先使用 shadow 观察）
+agent:
+  context_management:
+    mode: "legacy"                    # legacy | shadow | enabled
+    shadow_sample_basis_points: 0     # 0-10000；enabled 时非零值作为灰度比例
+    rollout_version: ""               # 灰度比例非零时必填
+    memory_enabled: false
+    exact_count_enabled: false
+    writeback_enabled: false          # enabled 下为 false 时显式使用 Legacy 写回
+    fingerprint_salt: ""              # 留空时从 encryption_key 派生用途隔离密钥
+
 # 外部服务配置
 external:
   markitdown:
